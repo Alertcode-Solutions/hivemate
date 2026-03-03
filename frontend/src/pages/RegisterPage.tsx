@@ -271,6 +271,15 @@ const RegisterPage = () => {
 
   return (
     <div className="auth-page auth-page--register">
+      {googleLoading && (
+        <div className="auth-google-overlay" role="status" aria-live="polite" aria-label="Signing up with Google">
+          <div className="auth-google-overlay__card">
+            <div className="auth-google-overlay__spinner" aria-hidden="true" />
+            <p className="auth-google-overlay__title">Signing up with Google</p>
+            <p className="auth-google-overlay__subtitle">Completing authentication...</p>
+          </div>
+        </div>
+      )}
       <div className="auth-container auth-container--register">
         <div className="auth-logo">
           <div className="auth-logo-ring"></div>
@@ -391,10 +400,14 @@ const RegisterPage = () => {
             <span>or</span>
           </div>
           {googleClientId ? (
-            <div className="google-signin-shell">
+            <div className={`google-signin-shell${googleLoading ? ' google-signin-shell--busy' : ''}`}>
               <div ref={googleButtonRef} className="google-signin-button" />
-              {!googleButtonVisible && googleButtonInitializing && <p className="status-note">Loading Google signup...</p>}
-              {googleLoading && <p className="status-note">Signing up with Google...</p>}
+              {!googleButtonVisible && googleButtonInitializing && (
+                <p className="status-note status-note--animated" role="status" aria-live="polite">
+                  <span className="status-note-spinner" aria-hidden="true" />
+                  Loading Google sign up...
+                </p>
+              )}
             </div>
           ) : null}
         </form>
