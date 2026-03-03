@@ -107,6 +107,7 @@ export const createProfile = async (req: Request, res: Response) => {
       skills: profileData.skills,
       profession: profileData.profession,
       photos: profileData.photos || [profileData.photo],
+      coverPhoto: profileData.coverPhoto,
       bio: profileData.bio,
       college: profileData.college,
       company: profileData.company,
@@ -149,6 +150,7 @@ export const createProfile = async (req: Request, res: Response) => {
         place: profile.place,
         skills: profile.skills,
         profession: profile.profession,
+        coverPhoto: profile.coverPhoto,
         bio: profile.bio,
         createdAt: profile.createdAt
       }
@@ -249,6 +251,7 @@ export const getProfile = async (req: Request, res: Response) => {
           skills: profile.skills,
           profession: profile.profession,
           photos: profile.photos,
+          coverPhoto: profile.coverPhoto,
           bio: profile.bio,
           college: profile.college,
           company: profile.company,
@@ -316,6 +319,7 @@ export const getProfile = async (req: Request, res: Response) => {
           religionOther: profile.religionOther,
           place: profile.place,
           photos: profile.photos,
+          coverPhoto: profile.coverPhoto,
           profession: profile.profession,
           bio: profile.bio,
           skills: profile.skills,
@@ -443,6 +447,10 @@ export const updateProfile = async (req: Request, res: Response) => {
     if (updates.skills !== undefined) profile.skills = updates.skills;
     if (updates.profession !== undefined) profile.profession = updates.profession;
     if (updates.photos !== undefined) profile.photos = updates.photos;
+    if (updates.coverPhoto !== undefined) {
+      const normalizedCover = String(updates.coverPhoto || '').trim();
+      profile.coverPhoto = normalizedCover || undefined;
+    }
     if (updates.bio !== undefined) profile.bio = updates.bio;
     if (updates.college !== undefined) profile.college = updates.college;
     if (updates.company !== undefined) profile.company = updates.company;
@@ -483,6 +491,7 @@ export const updateProfile = async (req: Request, res: Response) => {
         skills: profile.skills,
         profession: profile.profession,
         photos: profile.photos,
+        coverPhoto: profile.coverPhoto,
         bio: profile.bio,
         college: profile.college,
         company: profile.company,

@@ -13,6 +13,7 @@ export interface IProfile extends Document {
   skills: string[];
   profession: string;
   photos: string[];
+  coverPhoto?: string;
   bio: string;
   college?: string;
   company?: string;
@@ -96,6 +97,10 @@ const ProfileSchema: Schema = new Schema({
       },
       message: 'Maximum 5 photos allowed'
     }
+  },
+  coverPhoto: {
+    type: String,
+    trim: true
   },
   bio: {
     type: String,
