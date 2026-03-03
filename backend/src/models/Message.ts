@@ -6,12 +6,18 @@ export interface IMessage extends Document {
   receiverId: mongoose.Types.ObjectId;
   encryptedContent: string;
   senderEncryptedContent?: string;
+  replyToMessageId?: mongoose.Types.ObjectId;
   timestamp: Date;
   delivered: boolean;
   read: boolean;
   deletedForEveryone: boolean;
   deletedForUsers: mongoose.Types.ObjectId[];
   deletedAt?: Date;
+  reactions: Array<{
+    userId: mongoose.Types.ObjectId;
+    emoji: string;
+    reactedAt: Date;
+  }>;
 }
 
 const MessageSchema: Schema = new Schema({
@@ -38,6 +44,10 @@ const MessageSchema: Schema = new Schema({
   senderEncryptedContent: {
     type: String
   },
+  replyToMessageId: {
+    type: Schema.Types.ObjectId,
+    ref: 'Message'
+  },
   timestamp: {
     type: Date,
     default: Date.now,
@@ -61,8 +71,27 @@ const MessageSchema: Schema = new Schema({
   }],
   deletedAt: {
     type: Date
-  }
+  },
+  reactions: [
+    {
+      userId: {
+        type: Schema.Types.ObjectId,
+        ref: 'User',
+        required: true
+      },
+      emoji: {
+        type: String,
+        required: true
+      },
+      reactedAt: {
+        type: Date,
+        default: Date.now
+      }
+    }
+  ]
 });
+
+MessageSchema.path('reactions').default(() => []);
 
 // Compound index for efficient message queries
 MessageSchema.index({ chatRoomId: 1, timestamp: -1 });

@@ -1,7 +1,15 @@
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { getApiBaseUrl } from '../utils/runtimeConfig';
+import BeeLoader from '../components/BeeLoader';
+import useSmoothLoader from '../hooks/useSmoothLoader';
 import './CreateGigPage.css';
+
+const BackIcon = () => (
+  <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <path d="M15 5L8 12L15 19" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
 
 interface GigFormData {
   title: string;
@@ -33,6 +41,7 @@ const EditGigPage = () => {
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const { showLoader, complete, handleLoaderComplete } = useSmoothLoader(loading);
 
   const API_URL = getApiBaseUrl();
 
@@ -183,11 +192,11 @@ const EditGigPage = () => {
     }
   };
 
-  if (loading) {
+  if (showLoader) {
     return (
       <div className="create-gig-page">
         <div className="create-gig-container">
-          <div className="loading">Loading...</div>
+          <BeeLoader message="Loading opportunity..." compact complete={complete} onComplete={handleLoaderComplete} />
         </div>
       </div>
     );
@@ -197,8 +206,8 @@ const EditGigPage = () => {
     <div className="create-gig-page">
       <div className="create-gig-container">
         <div className="create-gig-header">
-          <button className="back-button" onClick={() => navigate(`/gig/${gigId}`)}>
-            ← Back
+          <button className="back-button" onClick={() => navigate(`/gig/${gigId}`)} aria-label="Go back">
+            <BackIcon />
           </button>
           <h1>Edit Opportunity</h1>
         </div>

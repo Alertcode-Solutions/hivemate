@@ -1,3 +1,5 @@
+import { syncExistingPushSubscription } from './pushNotifications';
+
 let waitingServiceWorker: ServiceWorker | null = null;
 let hasUpdateEventFired = false;
 
@@ -26,9 +28,22 @@ export function register() {
         console.log('Service Worker registered:', registration);
         trackWaitingWorker(registration);
 
-        setInterval(() => {
-          registration.update();
-        }, 30000);
+        const scheduleUpdateCheck = () => {
+          if (document.visibilityState === 'visible') {
+            registration.update().catch(() => undefined);
+            syncExistingPushSubscription().catch((error) => {
+              console.error('Push subscription sync failed:', error);
+            });
+          }
+        };
+
+        syncExistingPushSubscription().catch((error) => {
+          console.error('Push subscription sync failed:', error);
+        });
+
+        const updateInterval = window.setInterval(scheduleUpdateCheck, 5 * 60 * 1000);
+        document.addEventListener('visibilitychange', scheduleUpdateCheck);
+        window.addEventListener('focus', scheduleUpdateCheck);
 
         registration.onupdatefound = () => {
           const installingWorker = registration.installing;
@@ -41,6 +56,12 @@ export function register() {
             }
           };
         };
+
+        window.addEventListener('beforeunload', () => {
+          window.clearInterval(updateInterval);
+          document.removeEventListener('visibilitychange', scheduleUpdateCheck);
+          window.removeEventListener('focus', scheduleUpdateCheck);
+        });
       })
       .catch((error) => {
         console.error('Service Worker registration failed:', error);
@@ -50,13 +71,27 @@ export function register() {
 
 export function applyUpdate() {
   if (!('serviceWorker' in navigator)) return;
-  if (!waitingServiceWorker) return;
 
-  navigator.serviceWorker.addEventListener('controllerchange', () => {
-    window.location.reload();
-  }, { once: true });
+  const triggerReload = () => window.location.reload();
 
-  waitingServiceWorker.postMessage({ type: 'SKIP_WAITING' });
+  navigator.serviceWorker.addEventListener('controllerchange', triggerReload, { once: true });
+
+  navigator.serviceWorker.getRegistration().then((registration) => {
+    const candidateWorker =
+      waitingServiceWorker ||
+      registration?.waiting ||
+      registration?.installing ||
+      registration?.active ||
+      null;
+
+    if (candidateWorker) {
+      candidateWorker.postMessage({ type: 'SKIP_WAITING' });
+      waitingServiceWorker = null;
+    }
+
+    // Fallback reload so the update is applied even if controllerchange is delayed.
+    window.setTimeout(triggerReload, 500);
+  });
 }
 
 export function unregister() {

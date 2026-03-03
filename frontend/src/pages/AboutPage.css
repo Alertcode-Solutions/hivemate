@@ -25,12 +25,20 @@
   border: 1px solid rgba(152, 184, 241, 0.48);
   background: rgba(255, 255, 255, 0.1);
   color: #e8f0ff;
-  border-radius: 12px;
-  padding: 0.55rem 0.9rem;
-  font-size: 0.92rem;
-  font-weight: 600;
+  border-radius: 999px;
+  width: 40px;
+  height: 40px;
+  padding: 0.42rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   cursor: pointer;
   transition: transform 150ms ease, filter 150ms ease;
+}
+
+.about-back-btn svg {
+  width: 22px;
+  height: 22px;
 }
 
 .about-back-btn:hover {

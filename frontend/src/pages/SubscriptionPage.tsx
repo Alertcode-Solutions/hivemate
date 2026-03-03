@@ -1,7 +1,15 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { getApiBaseUrl } from '../utils/runtimeConfig';
+import BeeLoader from '../components/BeeLoader';
+import useSmoothLoader from '../hooks/useSmoothLoader';
 import './SubscriptionPage.css';
+
+const BackIcon = () => (
+  <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <path d="M15 5 8 12l7 7" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
 
 interface Subscription {
   id: string;
@@ -59,6 +67,7 @@ const SubscriptionPage = () => {
   const API_URL = getApiBaseUrl();
   const [subscription, setSubscription] = useState<Subscription | null>(null);
   const [loading, setLoading] = useState(true);
+  const { showLoader, complete, handleLoaderComplete } = useSmoothLoader(loading);
   const [error, setError] = useState<string | null>(null);
   const [processing, setProcessing] = useState(false);
   const [notice, setNotice] = useState('');
@@ -176,10 +185,10 @@ const SubscriptionPage = () => {
       day: 'numeric'
     });
 
-  if (loading) {
+  if (showLoader) {
     return (
       <div className="subscription-page">
-        <div className="subscription-loading">Loading subscription details...</div>
+        <BeeLoader message="Loading subscription details..." compact complete={complete} onComplete={handleLoaderComplete} />
       </div>
     );
   }
@@ -191,8 +200,8 @@ const SubscriptionPage = () => {
     <div className="subscription-page">
       <div className="subscription-shell">
         <header className="subscription-hero">
-          <button className="subscription-back-btn" onClick={() => navigate('/home')}>
-            Back
+          <button className="subscription-back-btn" onClick={() => navigate('/home')} aria-label="Go back">
+            <BackIcon />
           </button>
           <h1>Subscription</h1>
           <p>Unlock video-first networking while keeping your existing workflow unchanged.</p>

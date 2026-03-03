@@ -62,6 +62,7 @@ import searchRoutes from './routes/search';
 import notificationRoutes from './routes/notification';
 import pushRoutes from './routes/push';
 import matchRoutes from './routes/match';
+import presenceRoutes from './routes/presence';
 
 // API routes
 app.get('/api', (req, res) => {
@@ -85,6 +86,7 @@ app.use('/api/search', searchRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/push', pushRoutes);
 app.use('/api/match', matchRoutes);
+app.use('/api/presence', presenceRoutes);
 
 // Error handling middleware
 app.use((err: any, req: express.Request, res: express.Response, _next: express.NextFunction) => {

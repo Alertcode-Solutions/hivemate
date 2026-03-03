@@ -1,10 +1,13 @@
-import { useState, useEffect, useRef } from 'react';
+﻿import { useState, useEffect, useRef, useMemo, useLayoutEffect } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
-import { io, Socket } from 'socket.io-client';
+import { Socket } from 'socket.io-client';
 import { EncryptionService } from '../utils/encryption';
 import CallModal from '../components/CallModal';
-import { getApiBaseUrl, getWsBaseUrl } from '../utils/runtimeConfig';
+import { getApiBaseUrl } from '../utils/runtimeConfig';
+import { acquireSharedSocket, releaseSharedSocket } from '../utils/socketManager';
 import { goToProfile } from '../utils/profileRouting';
+import BeeLoader from '../components/BeeLoader';
+import useSmoothLoader from '../hooks/useSmoothLoader';
 import './ChatPage.css';
 
 interface ChatRoom {
@@ -30,14 +33,101 @@ interface Message {
   senderId: string;
   receiverId: string;
   encryptedContent: string;
+  replyToMessageId?: string | null;
   timestamp: Date;
   delivered: boolean;
   read: boolean;
   deletedForEveryone?: boolean;
+  reactions?: Array<{
+    userId: string;
+    emoji: string;
+    reactedAt?: Date | string;
+  }>;
 }
 
 const CIPHERTEXT_PLACEHOLDER = '[Encrypted message - not readable on this device]';
 const DELETED_MESSAGE_TEXT = 'This message was deleted';
+const MESSAGE_REACTION_OPTIONS = ['\u{1F44D}', '\u{2764}\u{FE0F}', '\u{1F602}', '\u{1F62E}', '\u{1F622}', '\u{1F64F}'];
+const QUICK_EMOJIS = ['\u{1F600}', '\u{1F602}', '\u{1F60D}', '\u{1F44D}', '\u{1F389}', '\u{1F525}', '\u{1F64F}', '\u{2764}\u{FE0F}'];
+const ACTION_SHEET_WIDTH = 264;
+const ACTION_SHEET_MARGIN = 10;
+const SWIPE_REPLY_THRESHOLD = 54;
+const MAX_SWIPE_DISTANCE = 60;
+const PREVIEW_REPLY_CHARS = 90;
+const AUTO_SCROLL_BOTTOM_EPSILON = 50;
+
+type MessageActionSheetState = {
+  messageId: string;
+  isOwn: boolean;
+  x: number;
+  y: number;
+  alignX: 'left' | 'right';
+  alignY: 'above' | 'below';
+} | null;
+type MessageActionSheetPosition = {
+  x: number;
+  y: number;
+  alignX: 'left' | 'right';
+  alignY: 'above' | 'below';
+};
+
+type ReactionViewer = {
+  userId: string;
+  name: string;
+  emoji: string;
+};
+
+type ReplyTarget = {
+  messageId: string;
+  senderId: string;
+  senderName: string;
+  text: string;
+  isOwn: boolean;
+};
+type MessageDeliveryStatus = 'sent' | 'delivered' | 'read';
+
+const BackArrowIcon = () => (
+  <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <path d="M15 5L8 12L15 19" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+
+const LockIcon = () => (
+  <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <path d="M7 11V8a5 5 0 1 1 10 0v3" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    <rect x="5" y="11" width="14" height="10" rx="2.5" fill="none" stroke="currentColor" strokeWidth="2" />
+  </svg>
+);
+
+const VoiceCallIcon = () => (
+  <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <path d="M6 4.8h3.3l1.2 3.9-1.9 1.4a13.4 13.4 0 0 0 5.4 5.4l1.4-1.9 3.9 1.2V18a2 2 0 0 1-2 2A13.3 13.3 0 0 1 4 6.8a2 2 0 0 1 2-2Z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+
+const VideoCallIcon = () => (
+  <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <rect x="3.8" y="6.5" width="11.5" height="11" rx="2.2" fill="none" stroke="currentColor" strokeWidth="1.8" />
+    <path d="M15.3 10.2 20.2 7.7v8.6l-4.9-2.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+
+const MessageStatusTicks = ({ status }: { status: MessageDeliveryStatus }) => {
+  if (status === 'sent') {
+    return (
+      <svg className="message-status-icon single" viewBox="0 0 12 12" aria-hidden="true" focusable="false">
+        <path d="M1.5 6.8L4.2 9.5L10.5 2.8" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    );
+  }
+
+  return (
+    <svg className="message-status-icon double" viewBox="0 0 17 12" aria-hidden="true" focusable="false">
+      <path d="M1.2 6.8L3.9 9.5L10.2 2.8" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M6.2 6.8L8.9 9.5L15.2 2.8" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+};
 
 const isLikelyCiphertext = (text: string): boolean => {
   if (!text) return false;
@@ -54,6 +144,7 @@ const ChatPage = () => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [messageInput, setMessageInput] = useState('');
   const [loading, setLoading] = useState(true);
+  const { showLoader, complete, handleLoaderComplete } = useSmoothLoader(loading);
   const [sending, setSending] = useState(false);
   const [encryptionReady, setEncryptionReady] = useState(false);
   const [showCallModal, setShowCallModal] = useState(false);
@@ -64,29 +155,47 @@ const ChatPage = () => {
     callerName?: string;
     callerId?: string;
   } | null>(null);
-  const [contextMenu, setContextMenu] = useState<{
-    x: number;
-    y: number;
-    messageId: string;
-    isOwn: boolean;
-  } | null>(null);
+  const [actionSheet, setActionSheet] = useState<MessageActionSheetState>(null);
   const [isPeerTyping, setIsPeerTyping] = useState(false);
   const [chatSearch, setChatSearch] = useState('');
   const [isMobileView, setIsMobileView] = useState(false);
   const [showSidebarOnMobile, setShowSidebarOnMobile] = useState(true);
+  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [participantPhotos, setParticipantPhotos] = useState<Record<string, string>>({});
   const [activeMatchBadge, setActiveMatchBadge] = useState(false);
+  const [reactionSheetMessageId, setReactionSheetMessageId] = useState<string | null>(null);
+  const [replyTarget, setReplyTarget] = useState<ReplyTarget | null>(null);
+  const [swipeOffsets, setSwipeOffsets] = useState<Record<string, number>>({});
+  const [swipingMessageId, setSwipingMessageId] = useState<string | null>(null);
+  const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
+  const [peerOnline, setPeerOnline] = useState(false);
+  const [peerLastSeen, setPeerLastSeen] = useState<string>('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement | null>(null);
   const wsRef = useRef<Socket | null>(null);
   const selectedChatRoomRef = useRef<ChatRoom | null>(null);
-  const hasActiveCallRef = useRef(false);
   const typingStopTimeoutRef = useRef<number | null>(null);
+  const messageInputRef = useRef<HTMLTextAreaElement | null>(null);
   const photoCacheRef = useRef<Record<string, string>>({});
+  const messagesSyncInFlightRef = useRef(false);
+  const longPressTimerRef = useRef<number | null>(null);
+  const longPressMovedRef = useRef(false);
+  const activePointerIdRef = useRef<number | null>(null);
+  const isNearBottomRef = useRef(true);
+  const shouldAutoScrollRef = useRef(true);
+  const initialScrollDoneRef = useRef<string>('');
+  const swipeStartRef = useRef<{ id: string; x: number; y: number } | null>(null);
+  const highlightTimerRef = useRef<number | null>(null);
+  const openedUserQueryRef = useRef<string>('');
+  const keyboardOffsetRef = useRef(0);
+  const keyboardHoldOffsetRef = useRef(0);
+  const keyboardVisibleRef = useRef(false);
+  const inputFocusedRef = useRef(false);
 
   const API_URL = getApiBaseUrl();
-  const WS_URL = getWsBaseUrl();
   const currentUserId = localStorage.getItem('userId');
   const roomFromQuery = new URLSearchParams(location.search).get('room');
+  const userFromQuery = new URLSearchParams(location.search).get('user');
   const currentUserIdStr = String(currentUserId || '');
   const normalizeId = (value: any): string => {
     if (!value) return '';
@@ -100,6 +209,85 @@ const ChatPage = () => {
       }
     }
     return String(value);
+  };
+
+
+  const isAtBottom = (container: HTMLDivElement | null) => {
+    if (!container) return true;
+    const distanceFromBottom =
+      container.scrollHeight - container.scrollTop - container.clientHeight;
+    return distanceFromBottom <= AUTO_SCROLL_BOTTOM_EPSILON;
+  };
+
+  const setChatViewportHeight = () => {
+    if (!isMobileView) {
+      document.documentElement.style.removeProperty('--chat-app-height');
+      return;
+    }
+    const viewportHeight = window.visualViewport?.height ?? window.innerHeight;
+    document.documentElement.style.setProperty('--chat-app-height', `${Math.max(0, viewportHeight)}px`);
+  };
+
+  const applyKeyboardOffset = (rawOffset: number) => {
+    const positiveOffset = Math.max(0, rawOffset);
+
+    if (positiveOffset > 0) {
+      keyboardVisibleRef.current = true;
+      keyboardOffsetRef.current = positiveOffset;
+      keyboardHoldOffsetRef.current = positiveOffset;
+    } else {
+      keyboardVisibleRef.current = false;
+      keyboardOffsetRef.current = 0;
+      if (!showEmojiPicker) {
+        keyboardHoldOffsetRef.current = 0;
+      }
+    }
+
+    const effectiveOffset =
+      showEmojiPicker && keyboardHoldOffsetRef.current > 0
+        ? keyboardHoldOffsetRef.current
+        : keyboardOffsetRef.current;
+
+    document.documentElement.style.setProperty('--chat-keyboard-offset', `${effectiveOffset}px`);
+  };
+
+  const getCurrentKeyboardOffset = () => {
+    const viewport = window.visualViewport;
+    if (!viewport) return 0;
+    return Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop);
+  };
+  const upsertMessagesById = (incoming: Message[]) => {
+    const byId = new Map<string, Message>();
+    for (const message of incoming) {
+      byId.set(normalizeId(message.id), { ...message, id: normalizeId(message.id) });
+    }
+    return Array.from(byId.values()).sort(
+      (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+    );
+  };
+
+  const appendMessageDedup = (nextMessage: Message) => {
+    const nextId = normalizeId(nextMessage.id);
+    setMessages((prev) => {
+      const existingIndex = prev.findIndex((message) => normalizeId(message.id) === nextId);
+      if (existingIndex >= 0) {
+        const updated = [...prev];
+        updated[existingIndex] = {
+          ...updated[existingIndex],
+          ...nextMessage,
+          id: nextId
+        };
+        return updated;
+      }
+      return [...prev, { ...nextMessage, id: nextId }];
+    });
+  };
+
+  const toReadableTimestamp = (value?: string | Date | null) => {
+    if (!value) return '';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return '';
+    return date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
   };
 
   const getOtherParticipant = (room: ChatRoom) =>
@@ -127,40 +315,97 @@ const ChatPage = () => {
 
     initializeEncryption();
     loadChatRooms();
-    setupWebSocket();
+    const cleanupSocket = setupWebSocket();
 
     return () => {
-      if (wsRef.current) {
-        wsRef.current.disconnect();
-      }
+      cleanupSocket?.();
     };
   }, []);
 
   useEffect(() => {
     if (selectedChatRoom) {
+      shouldAutoScrollRef.current = true;
+      isNearBottomRef.current = true;
+      initialScrollDoneRef.current = '';
+      setReplyTarget(null);
+      setReactionSheetMessageId(null);
       loadMessages(selectedChatRoom.chatRoomId);
     }
   }, [selectedChatRoom]);
 
   useEffect(() => {
+    const roomIdFromUrl = new URLSearchParams(location.search).get('room');
+    const userIdFromUrl = new URLSearchParams(location.search).get('user');
+    const normalizedRoomId = normalizeId(roomIdFromUrl);
+    const normalizedUserId = normalizeId(userIdFromUrl);
+
+    if (!normalizedRoomId && !normalizedUserId) {
+      if (isMobileView && !selectedChatRoom) {
+        setShowSidebarOnMobile(true);
+      }
+      return;
+    }
+
+    if (isMobileView) {
+      setShowSidebarOnMobile(false);
+    }
+
+    if (chatRooms.length > 0) {
+      const targetRoom = normalizedRoomId
+        ? chatRooms.find((room) => String(room.chatRoomId) === normalizedRoomId)
+        : chatRooms.find((room) =>
+            room.participants.some((participant) => normalizeId(participant.userId) === normalizedUserId)
+          );
+      if (
+        targetRoom &&
+        String(targetRoom.chatRoomId) !== String(selectedChatRoom?.chatRoomId || '')
+      ) {
+        setSelectedChatRoom(targetRoom);
+      }
+    }
+  }, [location.search, isMobileView, chatRooms, selectedChatRoom]);
+
+  useEffect(() => {
+    if (!('serviceWorker' in navigator)) return;
+
+    const handleSwNavigationMessage = (event: MessageEvent) => {
+      const message = event.data || {};
+      if (message.type !== 'NAVIGATE_TO_CHAT') return;
+
+      const messageUrl = String(message.url || '/chat');
+      let nextPath = '/chat';
+      try {
+        const parsed = new URL(messageUrl, window.location.origin);
+        nextPath = `${parsed.pathname}${parsed.search}`;
+      } catch {
+        nextPath = messageUrl;
+      }
+
+      navigate(nextPath);
+
+      const roomIdFromMessage = normalizeId(
+        message.chatRoomId || new URLSearchParams(nextPath.split('?')[1] || '').get('room')
+      );
+      if (!roomIdFromMessage) return;
+
+      if (isMobileView) {
+        setShowSidebarOnMobile(false);
+      }
+
+      const room = chatRooms.find((chat) => String(chat.chatRoomId) === roomIdFromMessage);
+      if (room && String(room.chatRoomId) !== String(selectedChatRoom?.chatRoomId || '')) {
+        setSelectedChatRoom(room);
+      }
+    };
+
+    navigator.serviceWorker.addEventListener('message', handleSwNavigationMessage);
+    return () => navigator.serviceWorker.removeEventListener('message', handleSwNavigationMessage);
+  }, [navigate, isMobileView, chatRooms, selectedChatRoom]);
+
+  useEffect(() => {
     selectedChatRoomRef.current = selectedChatRoom;
     setIsPeerTyping(false);
   }, [selectedChatRoom]);
-
-  useEffect(() => {
-    hasActiveCallRef.current = showCallModal && Boolean(currentCall);
-  }, [showCallModal, currentCall]);
-
-  useEffect(() => {
-    if (!selectedChatRoom) return;
-
-    // Fallback sync for tunnel/mobile cases when socket delivery is delayed.
-    const interval = setInterval(() => {
-      loadMessages(selectedChatRoom.chatRoomId);
-    }, 3000);
-
-    return () => clearInterval(interval);
-  }, [selectedChatRoom?.chatRoomId]);
 
   useEffect(() => {
     const loadMatchStatus = async () => {
@@ -191,36 +436,87 @@ const ChatPage = () => {
   }, [selectedChatRoom?.chatRoomId]);
 
   useEffect(() => {
+    const loadPresence = async () => {
+      const participantId = normalizeId(
+        selectedChatRoomRef.current?.participants.find(
+          (p) => normalizeId(p.userId) !== currentUserIdStr
+        )?.userId
+      );
+      if (!participantId) {
+        setPeerOnline(false);
+        setPeerLastSeen('');
+        return;
+      }
+      try {
+        const token = localStorage.getItem('token');
+        const response = await fetch(`${API_URL}/api/presence/${participantId}`, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        if (!response.ok) {
+          setPeerOnline(false);
+          setPeerLastSeen('');
+          return;
+        }
+        const data = await response.json();
+        setPeerOnline(Boolean(data?.online));
+        setPeerLastSeen(toReadableTimestamp(data?.lastSeen));
+      } catch {
+        setPeerOnline(false);
+        setPeerLastSeen('');
+      }
+    };
+
+    loadPresence();
+  }, [selectedChatRoom?.chatRoomId]);
+
+  useEffect(() => {
     const onSoftRefresh = () => {
       loadChatRooms();
       if (selectedChatRoomRef.current) {
-        loadMessages(selectedChatRoomRef.current.chatRoomId);
+        if (messagesSyncInFlightRef.current) return;
+        messagesSyncInFlightRef.current = true;
+        loadMessages(selectedChatRoomRef.current.chatRoomId).finally(() => {
+          messagesSyncInFlightRef.current = false;
+        });
       }
     };
 
     window.addEventListener('hivemate:soft-refresh', onSoftRefresh as EventListener);
+    window.addEventListener('hivemate:critical-refresh', onSoftRefresh as EventListener);
     return () => {
       window.removeEventListener('hivemate:soft-refresh', onSoftRefresh as EventListener);
+      window.removeEventListener('hivemate:critical-refresh', onSoftRefresh as EventListener);
     };
   }, []);
 
   useEffect(() => {
-    scrollToBottom();
-  }, [messages]);
+    const closePopups = () => {
+      setActionSheet(null);
+      setShowEmojiPicker(false);
+      setReactionSheetMessageId(null);
+    };
+    document.addEventListener('click', closePopups);
+    return () => document.removeEventListener('click', closePopups);
+  }, []);
 
   useEffect(() => {
-    const closeMenu = () => setContextMenu(null);
-    document.addEventListener('click', closeMenu);
-    return () => document.removeEventListener('click', closeMenu);
-  }, []);
+    const isCallActive = showCallModal && Boolean(currentCall);
+    (window as any).__hivemateCallOverlayActive = isCallActive;
+    return () => {
+      (window as any).__hivemateCallOverlayActive = false;
+    };
+  }, [showCallModal, currentCall]);
 
   useEffect(() => {
     const handleResize = () => {
       const mobile = window.innerWidth <= 768;
+      const deepLinkedRoomId = normalizeId(new URLSearchParams(window.location.search).get('room'));
       setIsMobileView(mobile);
 
       if (!mobile) {
         setShowSidebarOnMobile(true);
+      } else if (deepLinkedRoomId) {
+        setShowSidebarOnMobile(false);
       } else if (!selectedChatRoomRef.current) {
         setShowSidebarOnMobile(true);
       }
@@ -229,6 +525,94 @@ const ChatPage = () => {
     handleResize();
     window.addEventListener('resize', handleResize);
     return () => window.removeEventListener('resize', handleResize);
+  }, [location.search]);
+
+  useLayoutEffect(() => {
+    if (!isMobileView) {
+      document.documentElement.style.removeProperty('--chat-keyboard-offset');
+      document.documentElement.style.removeProperty('--chat-app-height');
+      keyboardOffsetRef.current = 0;
+      keyboardHoldOffsetRef.current = 0;
+      keyboardVisibleRef.current = false;
+      return;
+    }
+
+    const viewport = window.visualViewport;
+
+    const syncViewportLayout = () => {
+      setChatViewportHeight();
+      if (!viewport) {
+        applyKeyboardOffset(0);
+        return;
+      }
+      const keyboardOffset = Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop);
+      applyKeyboardOffset(keyboardOffset);
+      if (inputFocusedRef.current && selectedChatRoomRef.current) {
+        shouldAutoScrollRef.current = true;
+        isNearBottomRef.current = true;
+        requestAnimationFrame(() => scrollToBottom());
+      }
+    };
+
+    syncViewportLayout();
+    viewport?.addEventListener('resize', syncViewportLayout);
+    viewport?.addEventListener('scroll', syncViewportLayout);
+    window.addEventListener('resize', syncViewportLayout);
+    window.addEventListener('orientationchange', syncViewportLayout);
+
+    return () => {
+      viewport?.removeEventListener('resize', syncViewportLayout);
+      viewport?.removeEventListener('scroll', syncViewportLayout);
+      window.removeEventListener('resize', syncViewportLayout);
+      window.removeEventListener('orientationchange', syncViewportLayout);
+      document.documentElement.style.removeProperty('--chat-keyboard-offset');
+      document.documentElement.style.removeProperty('--chat-app-height');
+    };
+  }, [isMobileView, showEmojiPicker]);
+
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, []);
+
+  useEffect(() => {
+    const container = messagesContainerRef.current;
+    if (!container) return;
+
+    const updateNearBottom = () => {
+      isNearBottomRef.current = isAtBottom(container);
+    };
+
+    updateNearBottom();
+    container.addEventListener('scroll', updateNearBottom, { passive: true });
+    return () => container.removeEventListener('scroll', updateNearBottom);
+  }, [selectedChatRoom?.chatRoomId]);
+
+  useEffect(() => {
+    if (!messages.length) return;
+    const container = messagesContainerRef.current;
+    const userAtBottom = isAtBottom(container);
+    if (!shouldAutoScrollRef.current && !userAtBottom) return;
+
+    scrollToBottom();
+    shouldAutoScrollRef.current = false;
+    isNearBottomRef.current = true;
+  }, [messages]);
+
+  useEffect(() => {
+    return () => {
+      if (longPressTimerRef.current !== null) {
+        window.clearTimeout(longPressTimerRef.current);
+        longPressTimerRef.current = null;
+      }
+      if (highlightTimerRef.current !== null) {
+        window.clearTimeout(highlightTimerRef.current);
+        highlightTimerRef.current = null;
+      }
+    };
   }, []);
 
   const initializeEncryption = async () => {
@@ -252,77 +636,66 @@ const ChatPage = () => {
   };
 
   const setupWebSocket = () => {
-    const token = localStorage.getItem('token');
-    if (!token) return;
+    const socket = acquireSharedSocket();
+    if (!socket) return () => undefined;
 
-    // Connect to WebSocket server
-    const socket = io(WS_URL, {
-      auth: { token },
-      path: '/socket.io',
-      transports: ['websocket', 'polling'],
-      reconnection: true,
-      reconnectionAttempts: 20,
-      reconnectionDelay: 500
-    });
-
-    socket.on('connect', () => {
+    const handleConnect = () => {
       console.log('WebSocket connected');
-    });
+    };
 
-    socket.on('disconnect', () => {
+    const handleDisconnect = () => {
       console.log('WebSocket disconnected');
-    });
+    };
 
-    // Listen for incoming messages
-    socket.on('message:receive', async (data: any) => {
+    const handleMessageReceive = async (data: any) => {
       console.log('Received message:', data);
-      
+
       try {
-        // Decrypt the message
         const keyPair = await EncryptionService.getKeyPair();
         const decryptedContent = await EncryptionService.decryptMessage(
           data.encryptedContent,
           keyPair.privateKey
         );
 
-        // Add message to state if it's for the current chat
         if (selectedChatRoomRef.current && data.chatRoomId === selectedChatRoomRef.current.chatRoomId) {
+          shouldAutoScrollRef.current = isAtBottom(messagesContainerRef.current);
           const newMessage: Message = {
-            id: data.messageId,
+            id: normalizeId(data.messageId),
             senderId: data.senderId,
             receiverId: currentUserId!,
             encryptedContent: decryptedContent,
             timestamp: new Date(data.timestamp),
             delivered: true,
-            read: false
+            read: false,
+            reactions: []
           };
-        setMessages(prev => [...prev, newMessage]);
-      }
+          appendMessageDedup(newMessage);
+        }
 
-        // Refresh chat list to update last message
         loadChatRooms();
       } catch (error) {
-        console.error('Failed to decrypt message:', error);
         if (selectedChatRoomRef.current && data.chatRoomId === selectedChatRoomRef.current.chatRoomId) {
+          shouldAutoScrollRef.current = isAtBottom(messagesContainerRef.current);
           const unreadableMessage: Message = {
-            id: data.messageId,
+            id: normalizeId(data.messageId),
             senderId: data.senderId,
             receiverId: currentUserId!,
             encryptedContent: CIPHERTEXT_PLACEHOLDER,
             timestamp: new Date(data.timestamp),
             delivered: true,
-            read: false
+            read: false,
+            reactions: []
           };
-          setMessages(prev => [...prev, unreadableMessage]);
+          appendMessageDedup(unreadableMessage);
         }
       }
-    });
+    };
 
-    socket.on('error', (error: any) => {
+    const handleSocketError = (error: any) => {
       console.error('WebSocket error:', error);
-    });
+    };
 
-    socket.on('message:deleted_for_everyone', (data: any) => {
+    const handleDeletedForEveryone = (data: any) => {
       setMessages((prev) =>
         prev.map((msg) =>
           String(msg.id) === String(data.messageId)
@@ -330,52 +703,82 @@ const ChatPage = () => {
             : msg
         )
       );
-    });
+    };
 
-    socket.on('typing:start', (data: any) => {
+    const handleMessageReaction = (data: any) => {
+      const incomingChatRoomId = String(data?.chatRoomId || '');
+      const activeRoomId = String(selectedChatRoomRef.current?.chatRoomId || '');
+      if (!incomingChatRoomId || incomingChatRoomId !== activeRoomId) return;
+
+      setMessages((prev) =>
+        prev.map((msg) =>
+          String(msg.id) === String(data?.messageId)
+            ? {
+                ...msg,
+                reactions: Array.isArray(data?.reactions)
+                  ? data.reactions.map((reaction: any) => ({
+                      userId: String(reaction.userId),
+                      emoji: reaction.emoji,
+                      reactedAt: reaction.reactedAt
+                    }))
+                  : []
+              }
+            : msg
+        )
+      );
+    };
+
+    const handleTypingStart = (data: any) => {
       const activeRoom = selectedChatRoomRef.current;
       if (!activeRoom) return;
       if (data?.chatRoomId === activeRoom.chatRoomId) {
         setIsPeerTyping(true);
       }
-    });
+    };
 
-    socket.on('typing:stop', (data: any) => {
+    const handleTypingStop = (data: any) => {
       const activeRoom = selectedChatRoomRef.current;
       if (!activeRoom) return;
       if (data?.chatRoomId === activeRoom.chatRoomId) {
         setIsPeerTyping(false);
       }
-    });
+    };
 
-    // Listen for incoming calls
-    socket.on('call:incoming', (data: any) => {
-      console.log('Incoming call:', data);
-      if ((window as any).__hivemateCallOverlayActive) {
-        return;
-      }
-      if (hasActiveCallRef.current) {
-        const initiatorId = normalizeId(data.initiatorId);
-        if (initiatorId) {
-          socket.emit('call:reject', {
-            callId: data.callId,
-            initiatorId,
-            reason: 'busy'
-          });
-        }
-        return;
-      }
-      setCurrentCall({
-        callId: data.callId,
-        type: data.type,
-        isIncoming: true,
-        callerName: data.initiatorName,
-        callerId: String(data.initiatorId || '')
-      });
-      setShowCallModal(true);
-    });
+    const handlePresenceUpdate = (data: any) => {
+      const targetId = normalizeId(selectedChatRoomRef.current?.participants.find(
+        (p) => normalizeId(p.userId) !== currentUserIdStr
+      )?.userId);
+      if (!targetId) return;
+      if (normalizeId(data?.userId) !== targetId) return;
+      setPeerOnline(Boolean(data?.online));
+      setPeerLastSeen(toReadableTimestamp(data?.lastSeen || data?.timestamp));
+    };
+
+    socket.on('connect', handleConnect);
+    socket.on('disconnect', handleDisconnect);
+    socket.on('message:receive', handleMessageReceive);
+    socket.on('error', handleSocketError);
+    socket.on('message:deleted_for_everyone', handleDeletedForEveryone);
+    socket.on('typing:start', handleTypingStart);
+    socket.on('typing:stop', handleTypingStop);
+    socket.on('message:reaction', handleMessageReaction);
+    socket.on('presence:update', handlePresenceUpdate);
 
     wsRef.current = socket;
+
+    return () => {
+      socket.off('connect', handleConnect);
+      socket.off('disconnect', handleDisconnect);
+      socket.off('message:receive', handleMessageReceive);
+      socket.off('error', handleSocketError);
+      socket.off('message:deleted_for_everyone', handleDeletedForEveryone);
+      socket.off('typing:start', handleTypingStart);
+      socket.off('typing:stop', handleTypingStop);
+      socket.off('message:reaction', handleMessageReaction);
+      socket.off('presence:update', handlePresenceUpdate);
+      releaseSharedSocket();
+      wsRef.current = null;
+    };
   };
 
   const loadChatRooms = async () => {
@@ -392,14 +795,41 @@ const ChatPage = () => {
         await hydrateParticipantPhotos(chats);
         
         // If room query is provided, select that exact chat first.
-        const normalizedRoomId = normalizeId(roomFromQuery);
+        const normalizedRoomId = normalizeId(
+          new URLSearchParams(window.location.search).get('room') || roomFromQuery
+        );
+        const normalizedUserId = normalizeId(
+          new URLSearchParams(window.location.search).get('user') || userFromQuery
+        );
         if (normalizedRoomId && chats.length > 0) {
           const room = chats.find((c: ChatRoom) => String(c.chatRoomId) === normalizedRoomId);
           if (room) {
             setSelectedChatRoom(room);
-            if (isMobileView) setShowSidebarOnMobile(false);
+            setShowSidebarOnMobile(false);
+            console.log('[ChatPage] Selected room from deep link after chats load:', normalizedRoomId);
             return;
           }
+          // Keep mobile chat pane open for deep links even before room data resolves.
+          setShowSidebarOnMobile(false);
+          console.warn('[ChatPage] Deep-linked room not found in chat list response yet:', normalizedRoomId);
+        }
+
+        if (!normalizedRoomId && normalizedUserId && chats.length > 0) {
+          const roomByUser = chats.find((c: ChatRoom) =>
+            c.participants.some((p) => normalizeId(p.userId) === normalizedUserId)
+          );
+          if (roomByUser) {
+            openedUserQueryRef.current = '';
+            setSelectedChatRoom(roomByUser);
+            setShowSidebarOnMobile(false);
+            return;
+          }
+          if (openedUserQueryRef.current === normalizedUserId) {
+            return;
+          }
+          openedUserQueryRef.current = normalizedUserId;
+          await openDirectChat(normalizedUserId);
+          return;
         }
 
         // If friendshipId is provided, select by participant user id.
@@ -449,6 +879,7 @@ const ChatPage = () => {
 
       await hydrateParticipantPhotos([openedChat]);
       setSelectedChatRoom(openedChat);
+      openedUserQueryRef.current = '';
       if (isMobileView) setShowSidebarOnMobile(false);
     } catch (error) {
       console.error('Failed to open direct chat:', error);
@@ -519,8 +950,7 @@ const ChatPage = () => {
                 keyPair.privateKey
               );
               return { ...msg, encryptedContent: decryptedContent };
-            } catch (error) {
-              console.error('Failed to decrypt message:', error);
+            } catch {
               if (msg.deletedForEveryone) {
                 return { ...msg, encryptedContent: DELETED_MESSAGE_TEXT, deletedForEveryone: true };
               }
@@ -528,8 +958,13 @@ const ChatPage = () => {
             }
           })
         );
-        
-        setMessages(decryptedMessages);
+        const normalizedRoomId = normalizeId(chatRoomId);
+        const isFirstLoadForRoom = initialScrollDoneRef.current !== normalizedRoomId;
+        shouldAutoScrollRef.current = isFirstLoadForRoom || isAtBottom(messagesContainerRef.current);
+        setMessages(upsertMessagesById(decryptedMessages));
+        if (isFirstLoadForRoom) {
+          initialScrollDoneRef.current = normalizedRoomId;
+        }
         setChatRooms((prev) =>
           prev.map((room) =>
             String(room.chatRoomId) === String(chatRoomId)
@@ -544,7 +979,9 @@ const ChatPage = () => {
   };
 
   const sendMessage = async () => {
-    if (!messageInput.trim() || !selectedChatRoom || sending || !encryptionReady) return;
+    const sanitizedMessage = messageInput.trim();
+    if (!sanitizedMessage || !selectedChatRoom || sending || !encryptionReady) return;
+    const replyContext = replyTarget;
 
     setSending(true);
     try {
@@ -569,11 +1006,11 @@ const ChatPage = () => {
           token!
         );
         encryptedContent = await EncryptionService.encryptMessage(
-          messageInput,
+          sanitizedMessage,
           recipientPublicKey
         );
         senderEncryptedContent = await EncryptionService.encryptMessage(
-          messageInput,
+          sanitizedMessage,
           keyPair.publicKey
         );
       } catch (error) {
@@ -592,7 +1029,8 @@ const ChatPage = () => {
           receiverId,
           encryptedContent,
           senderEncryptedContent,
-          chatRoomId: selectedChatRoom.chatRoomId
+          chatRoomId: selectedChatRoom.chatRoomId,
+          replyToMessageId: replyContext?.messageId || undefined
         })
       });
 
@@ -601,17 +1039,27 @@ const ChatPage = () => {
         
         // Add message to local state (store decrypted version locally)
         const newMessage: Message = {
-          id: data.messageData.id,
+          id: normalizeId(data.messageData.id),
           senderId: currentUserId!,
           receiverId,
-          encryptedContent: messageInput, // Store decrypted for display
+          encryptedContent: sanitizedMessage, // Store decrypted for display
+          replyToMessageId: replyContext?.messageId || null,
           timestamp: new Date(data.messageData.timestamp),
-          delivered: data.messageData.delivered,
+          delivered: Boolean(data.messageData.delivered),
           read: false,
-          deletedForEveryone: false
+          deletedForEveryone: false,
+          reactions: []
         };
-        setMessages(prev => [...prev, newMessage]);
+        shouldAutoScrollRef.current = true;
+        isNearBottomRef.current = true;
+        appendMessageDedup(newMessage);
         setMessageInput('');
+        setReplyTarget(null);
+        setShowEmojiPicker(false);
+        setActionSheet(null);
+        if (messageInputRef.current) {
+          messageInputRef.current.style.height = 'auto';
+        }
         emitTypingState(false);
         if (typingStopTimeoutRef.current) {
           window.clearTimeout(typingStopTimeoutRef.current);
@@ -637,6 +1085,225 @@ const ChatPage = () => {
     }
   };
 
+  const handleInputPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const pastedText = e.clipboardData?.getData('text');
+    if (!pastedText) return;
+
+    e.preventDefault();
+    const target = e.currentTarget;
+    const start = target.selectionStart ?? messageInput.length;
+    const end = target.selectionEnd ?? messageInput.length;
+    const nextText = `${messageInput.slice(0, start)}${pastedText}${messageInput.slice(end)}`;
+    setMessageInput(nextText);
+
+    requestAnimationFrame(() => {
+      const nextCursorPos = start + pastedText.length;
+      target.selectionStart = nextCursorPos;
+      target.selectionEnd = nextCursorPos;
+    });
+  };
+
+  const addEmojiToInput = (emoji: string) => {
+    setMessageInput((prev) => `${prev}${emoji}`);
+    messageInputRef.current?.focus();
+    if (isAtBottom(messagesContainerRef.current)) {
+      shouldAutoScrollRef.current = true;
+      isNearBottomRef.current = true;
+      requestAnimationFrame(() => scrollToBottom());
+    }
+  };
+
+  const reactToMessage = async (messageId: string, emoji: string) => {
+    try {
+      const token = localStorage.getItem('token');
+      const response = await fetch(`${API_URL}/api/messages/${messageId}/reaction`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({ emoji })
+      });
+      if (!response.ok) return;
+      const data = await response.json();
+      setMessages((prev) =>
+        prev.map((message) =>
+          String(message.id) === String(messageId)
+            ? {
+                ...message,
+                reactions: Array.isArray(data?.reactions)
+                  ? data.reactions.map((reaction: any) => ({
+                      userId: String(reaction.userId),
+                      emoji: reaction.emoji,
+                      reactedAt: reaction.reactedAt
+                    }))
+                  : []
+              }
+            : message
+        )
+      );
+    } catch (error) {
+      console.error('Failed to react to message:', error);
+    } finally {
+      setActionSheet(null);
+    }
+  };
+
+  const removeReaction = async (messageId: string, event?: React.MouseEvent<HTMLButtonElement>) => {
+    event?.stopPropagation();
+    const snapshot = messages;
+    setMessages((prev) =>
+      prev.map((message) =>
+        String(message.id) === String(messageId)
+          ? {
+              ...message,
+              reactions: (message.reactions || []).filter(
+                (reaction) => normalizeId(reaction.userId) !== currentUserIdStr
+              )
+            }
+          : message
+      )
+    );
+    try {
+      const token = localStorage.getItem('token');
+      const response = await fetch(`${API_URL}/api/messages/${messageId}/reaction`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (!response.ok) {
+        setMessages(snapshot);
+        return;
+      }
+      const data = await response.json();
+      setMessages((prev) =>
+        prev.map((message) =>
+          String(message.id) === String(messageId)
+            ? {
+                ...message,
+                reactions: Array.isArray(data?.reactions)
+                  ? data.reactions.map((reaction: any) => ({
+                      userId: String(reaction.userId),
+                      emoji: reaction.emoji,
+                      reactedAt: reaction.reactedAt
+                    }))
+                  : []
+              }
+            : message
+        )
+      );
+    } catch (error) {
+      console.error('Failed to remove reaction:', error);
+      setMessages(snapshot);
+    } finally {
+      setActionSheet(null);
+      setReactionSheetMessageId(null);
+    }
+  };
+
+  const renderMessageContent = (text: string) => {
+    const linkPattern = /(https?:\/\/[^\s]+|www\.[^\s]+)/gi;
+    const parts = String(text || '').split(linkPattern);
+    return parts.map((part, index) => {
+      if (!part) return null;
+      const isLink = /^(https?:\/\/|www\.)/i.test(part);
+      if (!isLink) return <span key={`${part}-${index}`}>{part}</span>;
+      const href = part.startsWith('http') ? part : `https://${part}`;
+      return (
+        <a
+          key={`${part}-${index}`}
+          href={href}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="chat-link"
+          onClick={(e) => e.stopPropagation()}
+        >
+          {part}
+        </a>
+      );
+    });
+  };
+
+  const myReactionForMessage = (message: Message) =>
+    (message.reactions || []).find((reaction) => String(reaction.userId) === currentUserIdStr)?.emoji || '';
+
+  const groupedReactionsForMessage = (message: Message) => {
+    const grouped = new Map<string, { emoji: string; count: number; mine: boolean }>();
+    for (const reaction of message.reactions || []) {
+      const emoji = reaction.emoji;
+      const current = grouped.get(emoji);
+      const mine = String(reaction.userId) === currentUserIdStr;
+      if (!current) {
+        grouped.set(emoji, { emoji, count: 1, mine });
+      } else {
+        grouped.set(emoji, { emoji, count: current.count + 1, mine: current.mine || mine });
+      }
+    }
+    return Array.from(grouped.values());
+  };
+
+  const getParticipantName = (userId: string) => {
+    if (normalizeId(userId) === currentUserIdStr) return 'You';
+    const currentRoom = selectedChatRoomRef.current;
+    const participant = currentRoom?.participants.find((p) => normalizeId(p.userId) === normalizeId(userId));
+    return participant?.name || 'User';
+  };
+
+  const getReactionViewers = (message: Message): ReactionViewer[] => {
+    return (message.reactions || []).map((reaction) => ({
+      userId: normalizeId(reaction.userId),
+      name: getParticipantName(String(reaction.userId)),
+      emoji: reaction.emoji
+    }));
+  };
+
+  const reactionSheetMessage = useMemo(
+    () => (reactionSheetMessageId ? messages.find((message) => normalizeId(message.id) === normalizeId(reactionSheetMessageId)) || null : null),
+    [reactionSheetMessageId, messages]
+  );
+
+  const reactionSheetViewers = useMemo(
+    () => (reactionSheetMessage ? getReactionViewers(reactionSheetMessage) : []),
+    [reactionSheetMessage]
+  );
+
+  const messagesById = useMemo(() => {
+    const byId = new Map<string, Message>();
+    for (const message of messages) {
+      byId.set(normalizeId(message.id), message);
+    }
+    return byId;
+  }, [messages]);
+
+  const actionSheetMessage = useMemo(
+    () => (actionSheet ? messages.find((message) => String(message.id) === String(actionSheet.messageId)) || null : null),
+    [actionSheet, messages]
+  );
+  const myReactionOnActionSheetMessage = actionSheetMessage ? myReactionForMessage(actionSheetMessage) : '';
+
+  const getReplyPreviewForMessage = (message: Message) => {
+    const replyId = normalizeId(message.replyToMessageId);
+    if (!replyId) return null;
+
+    const repliedMessage = messagesById.get(replyId);
+    if (!repliedMessage) {
+      return {
+        senderName: 'Original message',
+        text: 'Message not available'
+      };
+    }
+
+    const senderName =
+      normalizeId(repliedMessage.senderId) === currentUserIdStr
+        ? 'You'
+        : getParticipantName(String(repliedMessage.senderId));
+    const text = String(repliedMessage.encryptedContent || '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, PREVIEW_REPLY_CHARS) || 'Message';
+
+    return { senderName, text };
+  };
+
   const emitTypingState = (isTyping: boolean) => {
     const activeRoom = selectedChatRoomRef.current;
     if (!activeRoom || !wsRef.current) return;
@@ -653,6 +1320,11 @@ const ChatPage = () => {
 
   const handleMessageInputChange = (value: string) => {
     setMessageInput(value);
+    if (messageInputRef.current) {
+      messageInputRef.current.style.height = 'auto';
+      const nextHeight = Math.min(messageInputRef.current.scrollHeight, 120);
+      messageInputRef.current.style.height = `${nextHeight}px`;
+    }
     if (!selectedChatRoomRef.current) return;
 
     if (value.trim()) {
@@ -669,7 +1341,12 @@ const ChatPage = () => {
   };
 
   const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    const container = messagesContainerRef.current;
+    if (container) {
+      container.scrollTop = container.scrollHeight;
+      return;
+    }
+    messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
   };
 
   const formatTime = (date: Date) => {
@@ -773,45 +1450,208 @@ const ChatPage = () => {
     ? selectedChatRoom.participants.find((p) => String(p.userId) !== currentUserIdStr)
     : null;
 
+  const headerPresenceText = isPeerTyping
+    ? 'Typing...'
+    : peerOnline
+      ? 'Online'
+      : peerLastSeen
+        ? `Last seen ${peerLastSeen}`
+        : 'Offline';
+
+  const buildActionSheetPosition = (
+    rect: DOMRect,
+    isOwn: boolean
+  ): MessageActionSheetPosition => {
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
+    const preferredX = isOwn ? rect.right - ACTION_SHEET_WIDTH : rect.left;
+    const clampedX = Math.max(
+      ACTION_SHEET_MARGIN,
+      Math.min(preferredX, viewportWidth - ACTION_SHEET_WIDTH - ACTION_SHEET_MARGIN)
+    );
+
+    const spaceBelow = viewportHeight - rect.bottom;
+    const sheetHeightEstimate = 188;
+    const alignY: 'above' | 'below' = spaceBelow < sheetHeightEstimate ? 'above' : 'below';
+    const y = alignY === 'above' ? rect.top - 8 : rect.bottom + 8;
+
+    return {
+      x: clampedX,
+      y,
+      alignX: isOwn ? 'right' : 'left',
+      alignY
+    };
+  };
+
+  const openActionSheetFromRect = (rect: DOMRect, message: Message, isOwnMessage: boolean) => {
+    if (message.deletedForEveryone) return;
+    const position = buildActionSheetPosition(rect, isOwnMessage);
+    setActionSheet({
+      messageId: String(message.id),
+      isOwn: isOwnMessage,
+      ...position
+    });
+    setShowEmojiPicker(false);
+  };
+
   const handleMessageContextMenu = (
-    event: React.MouseEvent,
+    event: React.MouseEvent<HTMLDivElement>,
     message: Message,
     isOwnMessage: boolean
   ) => {
     event.preventDefault();
-    if (message.deletedForEveryone) return;
-    setContextMenu({
-      x: event.clientX,
-      y: event.clientY,
-      messageId: message.id,
-      isOwn: isOwnMessage
+    event.stopPropagation();
+    const rect = (event.currentTarget as HTMLDivElement).getBoundingClientRect();
+    openActionSheetFromRect(rect, message, isOwnMessage);
+  };
+
+  const startMessageLongPress = (
+    event: React.PointerEvent<HTMLDivElement>,
+    message: Message,
+    isOwnMessage: boolean
+  ) => {
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
+    longPressMovedRef.current = false;
+    activePointerIdRef.current = event.pointerId;
+    const target = event.currentTarget;
+    longPressTimerRef.current = window.setTimeout(() => {
+      if (longPressMovedRef.current) return;
+      const rect = target.getBoundingClientRect();
+      openActionSheetFromRect(rect, message, isOwnMessage);
+    }, 360);
+  };
+
+  const cancelMessageLongPress = () => {
+    if (longPressTimerRef.current !== null) {
+      window.clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+    activePointerIdRef.current = null;
+  };
+
+  const moveMessageLongPress = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (activePointerIdRef.current === null) return;
+    if (event.pointerId !== activePointerIdRef.current) return;
+    if (Math.abs(event.movementX) > 6 || Math.abs(event.movementY) > 6) {
+      longPressMovedRef.current = true;
+      cancelMessageLongPress();
+    }
+  };
+
+  const startSwipeReply = (event: React.TouchEvent<HTMLDivElement>, message: Message) => {
+    if (event.touches.length !== 1 || message.deletedForEveryone) return;
+    const touch = event.touches[0];
+    const messageId = normalizeId(message.id);
+    swipeStartRef.current = {
+      id: messageId,
+      x: touch.clientX,
+      y: touch.clientY
+    };
+    setSwipingMessageId(messageId);
+    setSwipeOffsets((prev) => ({ ...prev, [messageId]: 0 }));
+  };
+
+  const moveSwipeReply = (
+    event: React.TouchEvent<HTMLDivElement>,
+    message: Message,
+    isOwnMessage: boolean
+  ) => {
+    const activeSwipe = swipeStartRef.current;
+    const messageId = normalizeId(message.id);
+    if (!activeSwipe || activeSwipe.id !== messageId) return;
+    const touch = event.touches?.[0];
+    if (!touch) return;
+
+    const diffX = touch.clientX - activeSwipe.x;
+    const diffY = touch.clientY - activeSwipe.y;
+    if (Math.abs(diffY) > 42) return;
+
+    let nextOffset = 0;
+    if (isOwnMessage) {
+      nextOffset = Math.max(-MAX_SWIPE_DISTANCE, Math.min(0, diffX));
+    } else {
+      nextOffset = Math.max(0, Math.min(MAX_SWIPE_DISTANCE, diffX));
+    }
+    setSwipeOffsets((prev) => ({ ...prev, [messageId]: nextOffset }));
+  };
+
+  const endSwipeReply = (
+    event: React.TouchEvent<HTMLDivElement>,
+    message: Message,
+    isOwnMessage: boolean
+  ) => {
+    const messageId = normalizeId(message.id);
+    if (!swipeStartRef.current || swipeStartRef.current.id !== messageId) return;
+    const touch = event.changedTouches?.[0];
+    if (!touch) {
+      swipeStartRef.current = null;
+      setSwipingMessageId(null);
+      setSwipeOffsets((prev) => ({ ...prev, [messageId]: 0 }));
+      return;
+    }
+
+    const diffX = touch.clientX - swipeStartRef.current.x;
+    const diffY = touch.clientY - swipeStartRef.current.y;
+    swipeStartRef.current = null;
+    setSwipingMessageId(null);
+    setSwipeOffsets((prev) => ({ ...prev, [messageId]: 0 }));
+
+    if (Math.abs(diffY) > 42) return;
+    if (!isOwnMessage && diffX < SWIPE_REPLY_THRESHOLD) return;
+    if (isOwnMessage && diffX > -SWIPE_REPLY_THRESHOLD) return;
+
+    const senderName = normalizeId(message.senderId) === currentUserIdStr ? 'You' : getParticipantName(String(message.senderId));
+    const safeText = String(message.encryptedContent || '').replace(/\s+/g, ' ').trim().slice(0, PREVIEW_REPLY_CHARS);
+    setReplyTarget({
+      messageId,
+      senderId: normalizeId(message.senderId),
+      senderName,
+      text: safeText,
+      isOwn: normalizeId(message.senderId) === currentUserIdStr
     });
+    messageInputRef.current?.focus();
+  };
+
+  const scrollToQuotedMessage = (replyToMessageId?: string | null) => {
+    const targetId = normalizeId(replyToMessageId);
+    if (!targetId) return;
+    const targetElement = document.getElementById(`message-${targetId}`);
+    if (!targetElement) return;
+
+    targetElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    setHighlightedMessageId(targetId);
+    if (highlightTimerRef.current !== null) {
+      window.clearTimeout(highlightTimerRef.current);
+    }
+    highlightTimerRef.current = window.setTimeout(() => {
+      setHighlightedMessageId(null);
+    }, 1500);
   };
 
   const deleteForMe = async () => {
-    if (!contextMenu) return;
+    if (!actionSheet) return;
     try {
       const token = localStorage.getItem('token');
-      const response = await fetch(`${API_URL}/api/messages/${contextMenu.messageId}/me`, {
+      const response = await fetch(`${API_URL}/api/messages/${actionSheet.messageId}/me`, {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${token}` }
       });
 
       if (response.ok) {
-        setMessages((prev) => prev.filter((m) => String(m.id) !== String(contextMenu.messageId)));
+        setMessages((prev) => prev.filter((m) => String(m.id) !== String(actionSheet.messageId)));
       }
     } catch (error) {
       console.error('Delete for me failed:', error);
     } finally {
-      setContextMenu(null);
+      setActionSheet(null);
     }
   };
 
   const deleteForEveryone = async () => {
-    if (!contextMenu || !contextMenu.isOwn) return;
+    if (!actionSheet || !actionSheet.isOwn) return;
     try {
       const token = localStorage.getItem('token');
-      const response = await fetch(`${API_URL}/api/messages/${contextMenu.messageId}/everyone`, {
+      const response = await fetch(`${API_URL}/api/messages/${actionSheet.messageId}/everyone`, {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${token}` }
       });
@@ -819,7 +1659,7 @@ const ChatPage = () => {
       if (response.ok) {
         setMessages((prev) =>
           prev.map((m) =>
-            String(m.id) === String(contextMenu.messageId)
+            String(m.id) === String(actionSheet.messageId)
               ? { ...m, encryptedContent: DELETED_MESSAGE_TEXT, deletedForEveryone: true }
               : m
           )
@@ -828,9 +1668,13 @@ const ChatPage = () => {
     } catch (error) {
       console.error('Delete for everyone failed:', error);
     } finally {
-      setContextMenu(null);
+      setActionSheet(null);
     }
   };
+
+  if (showLoader) {
+    return <BeeLoader message="Loading chats..." fullscreen complete={complete} onComplete={handleLoaderComplete} />;
+  }
 
   return (
     <div className="chat-page">
@@ -839,7 +1683,7 @@ const ChatPage = () => {
         <div className={`chat-list-sidebar ${isMobileView && showSidebarOnMobile ? 'mobile-visible' : ''}`}>
           <div className="chat-list-header">
             <button className="back-button" onClick={() => navigate('/home')}>
-              Back
+              <BackArrowIcon />
             </button>
             <h2>Messages</h2>
             <input
@@ -851,9 +1695,7 @@ const ChatPage = () => {
             />
           </div>
 
-          {loading ? (
-            <div className="chat-list-loading">Loading chats...</div>
-          ) : filteredChatRooms.length === 0 ? (
+          {filteredChatRooms.length === 0 ? (
             <div className="no-chats">
               <p>No matching chats</p>
               <p className="subtitle">Try a different name or profession.</p>
@@ -875,15 +1717,7 @@ const ChatPage = () => {
                       if (isMobileView) setShowSidebarOnMobile(false);
                     }}
                   >
-                    <button
-                      type="button"
-                      className="chat-avatar-btn"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        if (otherParticipant?.userId) openUserProfile(String(otherParticipant.userId));
-                      }}
-                      aria-label={`Open ${otherParticipant?.name || 'user'} profile`}
-                    >
+                    <div className="chat-avatar-btn" aria-hidden="true">
                       {getParticipantPhoto(otherParticipant) ? (
                         <img
                           src={getParticipantPhoto(otherParticipant)}
@@ -893,41 +1727,40 @@ const ChatPage = () => {
                       ) : (
                         <span className="chat-avatar-fallback">{getInitial(otherParticipant?.name)}</span>
                       )}
-                    </button>
-                    <div className="chat-list-item-info">
-                      <h3>
-                        <button
-                          type="button"
-                          className="chat-name-link"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            if (otherParticipant?.userId) openUserProfile(String(otherParticipant.userId));
-                          }}
-                        >
-                          {otherParticipant?.name || 'Unknown'}
-                        </button>
-                      </h3>
-                      <p className="profession">{otherParticipant?.profession}</p>
-                      {room.lastMessage && (
-                        <p className="last-message">
-                          {isLikelyCiphertext(room.lastMessage.encryptedContent)
-                            ? 'Encrypted message'
-                            : `${room.lastMessage.encryptedContent.substring(0, 30)}${
-                                room.lastMessage.encryptedContent.length > 30 ? '...' : ''
-                              }`}
-                        </p>
-                      )}
                     </div>
-                    {room.lastMessageAt && (
-                      <span className="last-message-time">
-                        {formatDate(new Date(room.lastMessageAt))}
-                      </span>
-                    )}
-                    {Number(room.unreadCount || 0) > 0 && (
-                      <span className="chat-unread-badge">
-                        {room.unreadCount! > 99 ? '99+' : room.unreadCount}
-                      </span>
-                    )}
+                    <div className="chat-list-item-main">
+                      <div className="chat-list-item-info">
+                        <h3>
+                          <span className="chat-name-link">
+                            {otherParticipant?.name || 'Unknown'}
+                          </span>
+                          {otherParticipant?.profession && (
+                            <span className="chat-name-profession">{` • ${otherParticipant.profession}`}</span>
+                          )}
+                        </h3>
+                        {room.lastMessage && (
+                          <p className="last-message">
+                            {isLikelyCiphertext(room.lastMessage.encryptedContent)
+                              ? 'Encrypted message'
+                              : `${room.lastMessage.encryptedContent.substring(0, 30)}${
+                                  room.lastMessage.encryptedContent.length > 30 ? '...' : ''
+                                }`}
+                          </p>
+                        )}
+                      </div>
+                      <div className="chat-list-item-meta">
+                        {room.lastMessageAt && (
+                          <span className="last-message-time">
+                            {formatDate(new Date(room.lastMessageAt))}
+                          </span>
+                        )}
+                        {Number(room.unreadCount || 0) > 0 && (
+                          <span className="chat-unread-badge">
+                            {room.unreadCount! > 99 ? '99+' : room.unreadCount}
+                          </span>
+                        )}
+                      </div>
+                    </div>
                   </div>
                 );
               })}
@@ -940,15 +1773,16 @@ const ChatPage = () => {
           {selectedChatRoom ? (
             <>
               <div className="chat-window-header">
-                {isMobileView && (
-                  <button
-                    className="back-to-chats-button"
-                    onClick={() => setShowSidebarOnMobile(true)}
-                  >
-                    Chats
-                  </button>
-                )}
-                <div className="chat-header-info">
+                <div className="chat-header-primary">
+                  {isMobileView && (
+                    <button
+                      className="back-to-chats-button"
+                      onClick={() => setShowSidebarOnMobile(true)}
+                      aria-label="Back to chats"
+                    >
+                      <BackArrowIcon />
+                    </button>
+                  )}
                   <button
                     type="button"
                     className="chat-header-user"
@@ -964,66 +1798,141 @@ const ChatPage = () => {
                     ) : (
                       <span className="chat-header-avatar-fallback">{getInitial(selectedOtherParticipant?.name)}</span>
                     )}
-                    <h2>
-                      {selectedChatRoom.participants
-                        .filter(p => String(p.userId) !== currentUserIdStr)
-                        .map(p => p.name)
-                        .join(', ')}
-                    </h2>
+                    <span className="chat-header-info">
+                      <span className="chat-header-name">
+                        {selectedChatRoom.participants
+                          .filter(p => String(p.userId) !== currentUserIdStr)
+                          .map(p => p.name)
+                          .join(', ')}
+                      </span>
+                      <span className="chat-header-subline">
+                        <span className="encryption-indicator">
+                          <span className="lock-icon"><LockIcon /></span>
+                          <span>End-to-end encrypted</span>
+                        </span>
+                        {activeMatchBadge && <span className="typing-indicator">{`Matched \u{1F496}`}</span>}
+                      </span>
+                      <span className={`typing-indicator ${isPeerTyping ? 'typing-live' : ''}`}>
+                        {headerPresenceText}
+                      </span>
+                    </span>
                   </button>
-                  <div className="encryption-indicator">
-                    <span className="lock-icon">🔒</span>
-                    <span>End-to-end encrypted</span>
-                  </div>
-                  {activeMatchBadge && <div className="typing-indicator">Matched 💖</div>}
-                  {isPeerTyping && <div className="typing-indicator">Typing...</div>}
                 </div>
-                <div className="call-buttons">
+                <div className="call-buttons" role="group" aria-label="Call actions">
                   <button
-                    className="call-button"
+                    className="call-button icon-only"
                     onClick={() => initiateCall('voice')}
                     title="Voice call"
+                    aria-label="Voice call"
                   >
-                    Call
+                    <VoiceCallIcon />
                   </button>
                   <button
-                    className="call-button"
+                    className="call-button icon-only"
                     onClick={() => initiateCall('video')}
                     title="Video call"
+                    aria-label="Video call"
                   >
-                    Video
+                    <VideoCallIcon />
                   </button>
                 </div>
               </div>
 
-              <div className="messages-container">
+              <div className="messages-container" ref={messagesContainerRef}>
                 {messages.map((message, index) => {
                   const isOwnMessage = String(message.senderId) === currentUserIdStr;
                   const showDate = index === 0 || 
                     formatDate(new Date(messages[index - 1].timestamp)) !== 
                     formatDate(new Date(message.timestamp));
+                  const replyPreview = message.deletedForEveryone ? null : getReplyPreviewForMessage(message);
 
                   return (
-                    <div key={message.id}>
+                    <div
+                      key={message.id}
+                      id={`message-${normalizeId(message.id)}`}
+                      className={highlightedMessageId === normalizeId(message.id) ? 'message-row message-row-highlight' : 'message-row'}
+                    >
                       {showDate && (
                         <div className="message-date-divider">
                           {formatDate(new Date(message.timestamp))}
                         </div>
                       )}
                       <div className={`message ${isOwnMessage ? 'own' : 'other'}`}>
-                        <div
-                          className={`message-content ${message.deletedForEveryone ? 'deleted' : ''}`}
-                          onContextMenu={(e) => handleMessageContextMenu(e, message, isOwnMessage)}
-                        >
-                          {message.encryptedContent}
+                        <div className="message-swipe-shell">
+                          <span className="message-reply-indicator" aria-hidden="true">
+                            ↩
+                          </span>
+                          <div
+                            className={`message-content ${message.deletedForEveryone ? 'deleted' : ''}`}
+                            style={{
+                              transform: `translateX(${swipeOffsets[normalizeId(message.id)] || 0}px)`,
+                              transition:
+                                swipingMessageId === normalizeId(message.id)
+                                  ? 'none'
+                                  : 'transform 0.2s ease-out'
+                            }}
+                            onContextMenu={(e) => handleMessageContextMenu(e, message, isOwnMessage)}
+                            onPointerDown={(e) => startMessageLongPress(e, message, isOwnMessage)}
+                            onPointerUp={cancelMessageLongPress}
+                            onPointerLeave={cancelMessageLongPress}
+                            onPointerCancel={cancelMessageLongPress}
+                            onPointerMove={moveMessageLongPress}
+                            onTouchStart={(e) => startSwipeReply(e, message)}
+                            onTouchMove={(e) => moveSwipeReply(e, message, isOwnMessage)}
+                            onTouchEnd={(e) => endSwipeReply(e, message, isOwnMessage)}
+                            onTouchCancel={(e) => endSwipeReply(e, message, isOwnMessage)}
+                          >
+                            {replyPreview && (
+                              <div
+                                className="message-quote"
+                                role="button"
+                                tabIndex={0}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  scrollToQuotedMessage(message.replyToMessageId);
+                                }}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter' || e.key === ' ') {
+                                    e.preventDefault();
+                                    scrollToQuotedMessage(message.replyToMessageId);
+                                  }
+                                }}
+                              >
+                                <span className="message-quote-sender">{replyPreview.senderName}</span>
+                                <span className="message-quote-text">{replyPreview.text}</span>
+                              </div>
+                            )}
+                            {renderMessageContent(message.encryptedContent)}
+                          </div>
                         </div>
+                        {Array.isArray(message.reactions) && message.reactions.length > 0 && (
+                          <div className="message-reactions-bar">
+                            {groupedReactionsForMessage(message).map((reaction) => (
+                              <button
+                                key={`${message.id}-${reaction.emoji}`}
+                                className={`reaction-chip ${reaction.mine ? 'reaction-chip-own' : ''}`}
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setReactionSheetMessageId(normalizeId(message.id));
+                                }}
+                              >
+                                <span className="reaction-chip-emoji">{reaction.emoji}</span>
+                                <span className="reaction-chip-count">{reaction.count}</span>
+                              </button>
+                            ))}
+                          </div>
+                        )}
                         <div className="message-meta">
                           <span className="message-time">
                             {formatTime(message.timestamp)}
                           </span>
                           {isOwnMessage && (
-                            <span className="message-status">
-                              {message.read ? '✓✓' : message.delivered ? '✓' : '○'}
+                            <span
+                              className={`message-status ${message.read ? 'read' : message.delivered ? 'delivered' : 'sent'}`}
+                              aria-label={message.read ? 'Read' : message.delivered ? 'Delivered' : 'Sent'}
+                            >
+                              <MessageStatusTicks status={message.read ? 'read' : message.delivered ? 'delivered' : 'sent'} />
                             </span>
                           )}
                         </div>
@@ -1035,12 +1944,105 @@ const ChatPage = () => {
               </div>
 
               <div className="message-input-container">
+                {replyTarget && (
+                  <div
+                    className={`reply-preview ${replyTarget.isOwn ? 'reply-preview-own' : 'reply-preview-other'}`}
+                    role="status"
+                    aria-live="polite"
+                  >
+                    <div className="reply-preview-text">
+                      <strong>Replying to {replyTarget.senderName}</strong>
+                      <span>{replyTarget.text}</span>
+                    </div>
+                    <button
+                      type="button"
+                      className="reply-preview-close"
+                      onClick={() => setReplyTarget(null)}
+                      aria-label="Cancel reply"
+                    >
+                      ×
+                    </button>
+                  </div>
+                )}
+                <button
+                  type="button"
+                  className="emoji-toggle-btn"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onTouchStart={(e) => e.preventDefault()}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setShowEmojiPicker((prev) => {
+                      const next = !prev;
+                      if (next) {
+                        const currentKeyboardOffset = Math.max(getCurrentKeyboardOffset(), keyboardOffsetRef.current);
+                        keyboardHoldOffsetRef.current = Math.max(
+                          keyboardHoldOffsetRef.current,
+                          currentKeyboardOffset
+                        );
+                        document.documentElement.style.setProperty(
+                          '--chat-keyboard-offset',
+                          `${keyboardHoldOffsetRef.current}px`
+                        );
+                      } else if (!keyboardVisibleRef.current) {
+                        keyboardHoldOffsetRef.current = 0;
+                      }
+                      if (isAtBottom(messagesContainerRef.current)) {
+                        shouldAutoScrollRef.current = true;
+                        isNearBottomRef.current = true;
+                        requestAnimationFrame(() => scrollToBottom());
+                      }
+                      return next;
+                    });
+                  }}
+                  aria-label="Open emoji picker"
+                >
+                  {'\u{1F642}'}
+                </button>
+                {showEmojiPicker && (
+                  <div
+                    className="emoji-picker-panel"
+                    role="dialog"
+                    aria-label="Emoji picker"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    {QUICK_EMOJIS.map((emoji) => (
+                      <button
+                        key={`quick-emoji-${emoji}`}
+                        type="button"
+                        className="emoji-option-btn"
+                        onClick={() => addEmojiToInput(emoji)}
+                      >
+                        {emoji}
+                      </button>
+                    ))}
+                  </div>
+                )}
                 <textarea
+                  ref={messageInputRef}
                   className="message-input"
                   placeholder="Type a message..."
                   value={messageInput}
                   onChange={(e) => handleMessageInputChange(e.target.value)}
+                  onFocus={() => {
+                    if (!isMobileView) return;
+                    inputFocusedRef.current = true;
+                    setChatViewportHeight();
+                    const viewport = window.visualViewport;
+                    const keyboardOffset = viewport
+                      ? Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop)
+                      : 0;
+                    applyKeyboardOffset(keyboardOffset);
+                    shouldAutoScrollRef.current = true;
+                    isNearBottomRef.current = true;
+                    requestAnimationFrame(() => scrollToBottom());
+                    window.setTimeout(() => scrollToBottom(), 40);
+                    window.setTimeout(() => scrollToBottom(), 120);
+                  }}
+                  onBlur={() => {
+                    inputFocusedRef.current = false;
+                  }}
                   onKeyDown={handleKeyPress}
+                  onPaste={handleInputPaste}
                   rows={1}
                   disabled={sending}
                 />
@@ -1076,13 +2078,31 @@ const ChatPage = () => {
         />
       )}
 
-      {contextMenu && (
+      {actionSheet && (
         <div
-          className="message-context-menu"
-          style={{ left: contextMenu.x, top: contextMenu.y }}
+          className={`message-action-sheet menu-align-${actionSheet.alignX} menu-${actionSheet.alignY}`}
+          style={{ left: `${actionSheet.x}px`, top: `${actionSheet.y}px` }}
           onClick={(e) => e.stopPropagation()}
         >
-          {contextMenu.isOwn && (
+          <div className="reaction-row" role="group" aria-label="React to message">
+            {MESSAGE_REACTION_OPTIONS.map((emoji) => (
+              <button
+                key={`sheet-reaction-${emoji}`}
+                type="button"
+                className={`reaction-pill ${myReactionOnActionSheetMessage === emoji ? 'reaction-pill-active' : ''}`}
+                onClick={() => reactToMessage(actionSheet.messageId, emoji)}
+                aria-label={`React with ${emoji}`}
+              >
+                {emoji}
+              </button>
+            ))}
+          </div>
+          {myReactionOnActionSheetMessage && (
+            <button className="context-item" onClick={(e) => removeReaction(actionSheet.messageId, e)}>
+              Remove my reaction
+            </button>
+          )}
+          {actionSheet.isOwn && (
             <button className="context-item danger" onClick={deleteForEveryone}>
               Delete for everyone
             </button>
@@ -1092,10 +2112,55 @@ const ChatPage = () => {
           </button>
         </div>
       )}
+
+      {reactionSheetMessage && (
+        <div className="reaction-sheet-backdrop" onClick={() => setReactionSheetMessageId(null)}>
+          <div className="reaction-sheet" onClick={(e) => e.stopPropagation()}>
+            <div className="reaction-sheet-handle" />
+            <div className="reaction-sheet-header">
+              <h4>Reactions</h4>
+              <button
+                type="button"
+                className="reaction-sheet-close"
+                onClick={() => setReactionSheetMessageId(null)}
+                aria-label="Close reactions"
+              >
+                ×
+              </button>
+            </div>
+            <div className="reaction-sheet-list">
+              {reactionSheetViewers.length === 0 ? (
+                <p className="reaction-sheet-empty">No reactions yet</p>
+              ) : (
+                reactionSheetViewers.map((viewer, index) => (
+                  <div className="reaction-sheet-row" key={`${viewer.userId}-${viewer.emoji}-${index}`}>
+                    <span className="reaction-sheet-emoji">{viewer.emoji}</span>
+                    <span className="reaction-sheet-name">{viewer.name}</span>
+                  </div>
+                ))
+              )}
+            </div>
+            {(reactionSheetMessage.reactions || []).some(
+              (reaction) => normalizeId(reaction.userId) === currentUserIdStr
+            ) && (
+              <button
+                type="button"
+                className="reaction-sheet-remove-btn"
+                onClick={(e) => removeReaction(reactionSheetMessage.id, e)}
+              >
+                Remove my reaction
+              </button>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 };
 
 export default ChatPage;
+
+
+
 
 

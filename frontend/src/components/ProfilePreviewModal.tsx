@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { getApiBaseUrl } from '../utils/runtimeConfig';
 import { goToProfile, resolveProfileTarget } from '../utils/profileRouting';
+import LoadingDots from './LoadingDots';
 import './ProfilePreviewModal.css';
 
 interface ProfilePreviewModalProps {
@@ -271,7 +272,11 @@ const ProfilePreviewModal = ({
           &times;
         </button>
 
-        {loading && <div className="modal-loading">Loading...</div>}
+        {loading && (
+          <div className="modal-loading">
+            <LoadingDots label="Loading profile" centered />
+          </div>
+        )}
 
         {error && <div className="modal-error">{error}</div>}
 

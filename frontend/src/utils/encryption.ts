@@ -18,6 +18,7 @@ export interface KeyPair {
 export class EncryptionService {
   private static keyPair: KeyPair | null = null;
   private static publicKeyCache: Map<string, CryptoKey> = new Map();
+  private static readonly BASE64_REGEX = /^[A-Za-z0-9+/=]+$/;
 
   /**
    * Generate RSA key pair for the current user
@@ -147,6 +148,12 @@ export class EncryptionService {
    * Decrypt message with own private key
    */
   static async decryptMessage(encryptedMessage: string, privateKey: CryptoKey): Promise<string> {
+    if (!encryptedMessage) return '';
+    if (!this.BASE64_REGEX.test(encryptedMessage) || encryptedMessage.length < 24) {
+      // Backward compatibility for plaintext legacy messages.
+      return encryptedMessage;
+    }
+
     try {
       const binaryString = atob(encryptedMessage);
       const bytes = new Uint8Array(binaryString.length);
@@ -163,7 +170,6 @@ export class EncryptionService {
       const decoder = new TextDecoder();
       return decoder.decode(decrypted);
     } catch (error) {
-      console.error('Failed to decrypt message:', error);
       throw new Error('Message decryption failed');
     }
   }

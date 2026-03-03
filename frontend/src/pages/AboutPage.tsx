@@ -1,6 +1,12 @@
 import { useNavigate } from 'react-router-dom';
 import './AboutPage.css';
 
+const BackIcon = () => (
+  <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <path d="M15 5 8 12l7 7" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+
 const featureItems = [
   {
     title: 'Radar Discovery',
@@ -54,8 +60,8 @@ const AboutPage = () => {
     <div className="about-page">
       <div className="about-shell">
         <header className="about-header">
-          <button className="about-back-btn" onClick={() => navigate(-1)}>
-            Back
+          <button className="about-back-btn" onClick={() => navigate(-1)} aria-label="Go back">
+            <BackIcon />
           </button>
           <h1>About HiveMate</h1>
           <p>Professional networking with proximity, privacy, and purpose.</p>

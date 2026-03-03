@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { getApiBaseUrl } from '../utils/runtimeConfig';
 import { goToProfile, resolveProfileTarget } from '../utils/profileRouting';
+import LoadingDots from '../components/LoadingDots';
 import './SearchPage.css';
 
 interface SearchFilters {
@@ -429,7 +430,9 @@ const SearchPage = () => {
               )}
 
               {loading ? (
-                <div className="loading">Searching...</div>
+                <div className="loading">
+                  <LoadingDots label="Searching" centered />
+                </div>
               ) : profileResults.length > 0 ? (
                 <div className="profile-results">
                   {profileResults.map((profile) => (

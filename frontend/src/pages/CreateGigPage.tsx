@@ -3,6 +3,12 @@ import { useNavigate } from 'react-router-dom';
 import { getApiBaseUrl } from '../utils/runtimeConfig';
 import './CreateGigPage.css';
 
+const BackIcon = () => (
+  <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <path d="M15 5L8 12L15 19" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+
 interface GigFormData {
   title: string;
   description: string;
@@ -141,8 +147,8 @@ const CreateGigPage = () => {
     <div className="create-gig-page">
       <div className="create-gig-container">
         <div className="create-gig-header">
-          <button className="back-button" onClick={() => navigate(-1)}>
-            ← Back
+          <button className="back-button" onClick={() => navigate(-1)} aria-label="Go back">
+            <BackIcon />
           </button>
           <h1>Create New Opportunity</h1>
         </div>

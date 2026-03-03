@@ -213,6 +213,55 @@
   animation: pulse 1.5s ease-in-out infinite;
 }
 
+.radar-permission-dialog {
+  position: absolute;
+  top: 1rem;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(560px, calc(100% - 2rem));
+  background: rgba(255, 255, 255, 0.98);
+  border: 1px solid rgba(146, 176, 232, 0.45);
+  border-radius: 14px;
+  padding: 0.85rem 0.95rem;
+  box-shadow: 0 14px 28px rgba(24, 42, 78, 0.2);
+  z-index: 12;
+}
+
+.radar-permission-dialog h4 {
+  margin: 0 0 0.2rem;
+  font-size: 0.95rem;
+  color: #112041;
+}
+
+.radar-permission-dialog p {
+  margin: 0;
+  font-size: 0.86rem;
+  line-height: 1.35;
+  color: #51648d;
+}
+
+.radar-permission-btn {
+  margin-top: 0.7rem;
+  min-height: 38px;
+  border: 1px solid rgba(118, 147, 224, 0.36);
+  background: linear-gradient(125deg, #446cf1 0%, #5d74f8 62%, #7083fd 100%);
+  color: #ffffff;
+  border-radius: 10px;
+  padding: 0.52rem 0.9rem;
+  font-size: 0.86rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.radar-permission-btn:hover:not(:disabled) {
+  filter: brightness(1.05);
+}
+
+.radar-permission-btn:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
 @keyframes pulse {
   0%, 100% {
     opacity: 1;
@@ -234,6 +283,28 @@
   color: #64748b;
   font-size: 0.9rem;
   box-shadow: 0 8px 16px rgba(15, 23, 42, 0.08);
+  text-align: center;
+  display: grid;
+  gap: 0.45rem;
+}
+
+.no-users-message p {
+  margin: 0;
+}
+
+.allow-location-btn {
+  border: 1px solid rgba(118, 147, 224, 0.36);
+  background: linear-gradient(125deg, #446cf1 0%, #5d74f8 62%, #7083fd 100%);
+  color: #ffffff;
+  border-radius: 10px;
+  padding: 0.5rem 0.85rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.allow-location-btn:hover {
+  filter: brightness(1.05);
 }
 
 /* Nearby List */
@@ -485,6 +556,12 @@
   .radar-canvas {
     width: min(520px, calc(100% - 0.4rem));
     height: min(520px, calc(100% - 0.4rem));
+  }
+
+  .radar-permission-dialog {
+    top: 0.75rem;
+    width: calc(100% - 1rem);
+    padding: 0.75rem 0.8rem;
   }
 
   .nearby-list {

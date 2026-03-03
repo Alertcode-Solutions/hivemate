@@ -1,9 +1,12 @@
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { lazy, Suspense, useEffect, useState } from 'react';
 import { applyUpdate } from './utils/serviceWorkerRegistration';
+import { startRefreshScheduler, stopRefreshScheduler } from './utils/refreshScheduler';
+import { ensureFriendRequestPushSubscription } from './utils/pushNotifications';
 import ErrorBoundary from './components/ErrorBoundary';
 import { ToastProvider } from './components/Toast';
 import GlobalCallHandler from './components/GlobalCallHandler';
+import BeeLoader from './components/BeeLoader';
 import './App.css';
 
 // Eager load critical pages
@@ -27,48 +30,30 @@ const SearchPage = lazy(() => import('./pages/SearchPage'));
 
 // Loading component
 const LoadingFallback = () => (
-  <div className="app-loading-fallback">
-    <div className="app-loading-inner">
-      <div className="app-loading-spinner"></div>
-      <p>Loading...</p>
-    </div>
-  </div>
+  <BeeLoader message="Preparing HiveMate..." fullscreen />
 );
 
 function App() {
   const [updateAvailable, setUpdateAvailable] = useState(false);
 
   useEffect(() => {
-    const interval = window.setInterval(() => {
-      if (!localStorage.getItem('token')) return;
-      if (document.visibilityState !== 'visible') return;
-      window.dispatchEvent(new CustomEvent('hivemate:soft-refresh'));
-    }, 7000);
+    startRefreshScheduler();
+    return () => stopRefreshScheduler();
+  }, []);
 
-    return () => window.clearInterval(interval);
+  useEffect(() => {
+    ensureFriendRequestPushSubscription().catch((error) => {
+      console.error('Push subscription setup failed:', error);
+    });
   }, []);
 
   useEffect(() => {
     const onUpdateAvailable = () => setUpdateAvailable(true);
-    const onVisible = () => {
-      if (document.visibilityState === 'visible' && localStorage.getItem('token')) {
-        window.dispatchEvent(new CustomEvent('hivemate:soft-refresh'));
-      }
-    };
-    const onFocus = () => {
-      if (localStorage.getItem('token')) {
-        window.dispatchEvent(new CustomEvent('hivemate:soft-refresh'));
-      }
-    };
 
     window.addEventListener('hivemate:update-available', onUpdateAvailable as EventListener);
-    document.addEventListener('visibilitychange', onVisible);
-    window.addEventListener('focus', onFocus);
 
     return () => {
       window.removeEventListener('hivemate:update-available', onUpdateAvailable as EventListener);
-      document.removeEventListener('visibilitychange', onVisible);
-      window.removeEventListener('focus', onFocus);
     };
   }, []);
 

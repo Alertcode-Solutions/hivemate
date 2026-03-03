@@ -4,6 +4,8 @@ import { getApiBaseUrl } from '../utils/runtimeConfig';
 import AppContainer from '../components/ui/AppContainer';
 import PageHeader from '../components/ui/PageHeader';
 import { goToProfile } from '../utils/profileRouting';
+import BeeLoader from '../components/BeeLoader';
+import useSmoothLoader from '../hooks/useSmoothLoader';
 import './FriendsPage.css';
 
 interface Friend {
@@ -30,6 +32,7 @@ const FriendsPage = () => {
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
   const [ownerName, setOwnerName] = useState('');
+  const { showLoader, complete, handleLoaderComplete } = useSmoothLoader(loading);
 
   const API_URL = getApiBaseUrl();
   const currentUserId = localStorage.getItem('userId') || '';
@@ -105,6 +108,10 @@ const FriendsPage = () => {
 
   const getInitial = (name?: string) => (name?.charAt(0).toUpperCase() || 'U');
 
+  if (showLoader) {
+    return <BeeLoader message="Loading friends..." fullscreen complete={complete} onComplete={handleLoaderComplete} />;
+  }
+
   return (
     <div className="friends-page">
       <AppContainer size="sm">
@@ -128,9 +135,7 @@ const FriendsPage = () => {
             />
           </div>
 
-          {loading ? (
-            <div className="friends-loading">Loading friends...</div>
-          ) : filteredFriends.length === 0 ? (
+          {filteredFriends.length === 0 ? (
             <div className="no-friends">
               <p>No friends yet</p>
               <p className="subtitle">Incoming requests are available in Connections.</p>

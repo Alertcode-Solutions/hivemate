@@ -251,7 +251,7 @@ const HomePage = () => {
                 tabIndex={viewMode === 'partner' ? 0 : -1}
                 ref={(el) => { tabRefs.current[0] = el; }}
               >
-                Find a Partner
+                Find a Friend
               </button>
               <button
                 className={`toggle-option toggle-option-disabled ${viewMode === 'teammate' ? 'active' : ''}`}

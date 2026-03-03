@@ -113,10 +113,19 @@ self.addEventListener('push', (event) => {
   } catch {
     payload = { title: 'HiveMate', body: event.data.text() };
   }
+  console.log('Push Payload:', payload);
 
   const title = payload.title || 'HiveMate';
-  const isMessageNotification = payload.notificationType === 'message';
-  const isCallNotification = payload.notificationType === 'call_request';
+  const payloadData = payload.data || {};
+  const pushSentAt = Number(payload.sentAt || payloadData.sentAt || 0);
+  if (pushSentAt > 0) {
+    const latencyMs = Date.now() - pushSentAt;
+    console.log('[SW] push delivery latency (ms):', latencyMs);
+  }
+  const resolvedNotificationType = payload.notificationType || payloadData.notificationType || '';
+  const resolvedChatRoomId = payload.chatRoomId || payloadData.chatRoomId || '';
+  const isMessageNotification = resolvedNotificationType === 'message';
+  const isCallNotification = resolvedNotificationType === 'call_request';
   const primaryActionTitle = isCallNotification
     ? 'Answer call'
     : isMessageNotification
@@ -132,7 +141,20 @@ self.addEventListener('push', (event) => {
     requireInteraction: isCallNotification,
     vibrate: isCallNotification ? [180, 80, 180, 80, 180] : [120, 60, 120],
     data: {
-      url: payload.url || '/connections'
+      url: payload.url || payloadData.url || '/connections',
+      notificationType: resolvedNotificationType,
+      chatRoomId: resolvedChatRoomId,
+      senderId:
+        payload.senderId ||
+        payload.fromUserId ||
+        payload.userId ||
+        payloadData.senderId ||
+        payloadData.fromUserId ||
+        payloadData.userId ||
+        '',
+      callId: payload.callId || payloadData.callId || '',
+      callType: payload.callType || payloadData.callType || '',
+      callerId: payload.callerId || payloadData.callerId || ''
     },
     actions: [
       { action: primaryAction, title: primaryActionTitle },
@@ -140,7 +162,13 @@ self.addEventListener('push', (event) => {
     ]
   };
 
-  event.waitUntil(self.registration.showNotification(title, options));
+  const notificationPromise = self.registration
+    .showNotification(title, options)
+    .catch((err) => {
+      console.error('[SW] showNotification failed:', err);
+    });
+
+  event.waitUntil(notificationPromise);
 });
 
 self.addEventListener('notificationclick', (event) => {
@@ -148,7 +176,39 @@ self.addEventListener('notificationclick', (event) => {
 
   if (event.action === 'dismiss') return;
 
-  let targetUrl = (event.notification && event.notification.data && event.notification.data.url) || '/connections';
+  const notificationData = (event.notification && event.notification.data) || {};
+  console.log('[SW] notificationclick received', {
+    action: event.action || 'default',
+    notificationData
+  });
+
+  let targetUrl = notificationData.url || '/connections';
+  const notificationType = String(notificationData.notificationType || '');
+  const chatRoomId = String(notificationData.chatRoomId || '');
+  const senderId = String(notificationData.senderId || '');
+  const callId = String(notificationData.callId || '');
+  const callerId = String(notificationData.callerId || '');
+  const callType = String(notificationData.callType || 'voice');
+
+  if (notificationType === 'message') {
+    if (chatRoomId) {
+      targetUrl = `/chat?room=${encodeURIComponent(chatRoomId)}`;
+    } else if (senderId) {
+      targetUrl = `/chat?user=${encodeURIComponent(senderId)}`;
+    } else {
+      targetUrl = '/chat';
+    }
+  } else if (notificationType === 'call_request' && callId) {
+    const params = new URLSearchParams({
+      incomingCall: '1',
+      callId,
+      type: callType === 'video' ? 'video' : 'voice',
+      from: callerId,
+      name: ''
+    });
+    targetUrl = `/chat?${params.toString()}`;
+  }
+
   if (event.action === 'answer') {
     try {
       const urlObj = new URL(targetUrl, self.location.origin);
@@ -165,13 +225,36 @@ self.addEventListener('notificationclick', (event) => {
     }
   }
 
+  console.log('[SW] notificationclick resolved targetUrl', {
+    notificationType,
+    chatRoomId,
+    senderId,
+    targetUrl
+  });
+
   event.waitUntil(
     clients.matchAll({ type: 'window', includeUncontrolled: true }).then(async (clientList) => {
+      console.log('[SW] notificationclick matched clients', {
+        clientCount: clientList.length
+      });
       for (const client of clientList) {
         if ('focus' in client) {
           try {
+            console.log('[SW] Focusing existing client', { url: client.url });
             await client.focus();
+            try {
+              client.postMessage({
+                type: 'NAVIGATE_TO_CHAT',
+                url: targetUrl,
+                chatRoomId
+              });
+              console.log('[SW] Posted SPA navigation message to focused client', { to: targetUrl, chatRoomId });
+              return;
+            } catch (postError) {
+              console.error('[SW] postMessage failed, falling back to navigate', postError);
+            }
             if ('navigate' in client) {
+              console.log('[SW] Navigating existing client', { to: targetUrl });
               await client.navigate(targetUrl);
             }
             return;
@@ -181,6 +264,7 @@ self.addEventListener('notificationclick', (event) => {
         }
       }
       if (clients.openWindow) {
+        console.log('[SW] Opening new window for notification target', { to: targetUrl });
         return clients.openWindow(targetUrl);
       }
       return undefined;

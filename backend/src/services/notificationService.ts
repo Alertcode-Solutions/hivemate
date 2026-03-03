@@ -22,6 +22,37 @@ export class NotificationService {
     data?: any
   ) {
     try {
+      const dispatchPush = () => {
+        if (type === 'friend_request') {
+          const senderName = data?.senderName || message.split(' sent you')[0] || 'Someone';
+          void PushNotificationService.sendFriendRequestPush(userId, senderName).catch((pushError) => {
+            console.error('Friend request push send failed:', pushError);
+          });
+        } else if (type === 'message') {
+          const senderName = data?.senderName || message.split(' sent you')[0] || 'Someone';
+          const chatRoomId = data?.chatRoomId ? String(data.chatRoomId) : undefined;
+          const senderId = data?.senderId ? String(data.senderId) : undefined;
+          void PushNotificationService.sendMessagePush(userId, senderName, chatRoomId, senderId).catch((pushError) => {
+            console.error('Message push send failed:', pushError);
+          });
+        } else if (type === 'call_request') {
+          const callerName = data?.callerName || message.split(' is calling you')[0] || 'Someone';
+          const callerId = data?.callerId ? String(data.callerId) : '';
+          const callType = data?.callType === 'video' ? 'video' : 'voice';
+          const callId = data?.callId ? String(data.callId) : '';
+          if (callerId && callId) {
+            void PushNotificationService.sendCallPush(userId, callerName, callerId, callType, callId).catch((pushError) => {
+              console.error('Call push send failed:', pushError);
+            });
+          }
+        }
+      };
+
+      // Dispatch message push immediately in background so push send doesn't wait for DB writes.
+      if (type === 'message') {
+        dispatchPush();
+      }
+
       const notification = new Notification({
         userId,
         type,
@@ -49,22 +80,9 @@ export class NotificationService {
         console.log('WebSocket not available, notification saved to database only');
       }
 
-      // Push notification: friend requests, messages, and calls.
-      if (type === 'friend_request') {
-        const senderName = data?.senderName || message.split(' sent you')[0] || 'Someone';
-        await PushNotificationService.sendFriendRequestPush(userId, senderName);
-      } else if (type === 'message') {
-        const senderName = data?.senderName || message.split(' sent you')[0] || 'Someone';
-        const chatRoomId = data?.chatRoomId ? String(data.chatRoomId) : undefined;
-        await PushNotificationService.sendMessagePush(userId, senderName, chatRoomId);
-      } else if (type === 'call_request') {
-        const callerName = data?.callerName || message.split(' is calling you')[0] || 'Someone';
-        const callerId = data?.callerId ? String(data.callerId) : '';
-        const callType = data?.callType === 'video' ? 'video' : 'voice';
-        const callId = data?.callId ? String(data.callId) : '';
-        if (callerId && callId) {
-          await PushNotificationService.sendCallPush(userId, callerName, callerId, callType, callId);
-        }
+      // Push notification: friend requests and calls after persistence; message push already dispatched above.
+      if (type !== 'message') {
+        dispatchPush();
       }
 
       return notification;

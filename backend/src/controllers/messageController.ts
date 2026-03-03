@@ -14,7 +14,7 @@ const DELETED_MESSAGE_TEXT = 'This message was deleted';
 export const sendMessage = async (req: Request, res: Response) => {
   try {
     const senderId = (req as any).userId;
-    const { receiverId, encryptedContent, senderEncryptedContent, chatRoomId } = req.body;
+    const { receiverId, encryptedContent, senderEncryptedContent, chatRoomId, replyToMessageId } = req.body;
 
     if (!receiverId || !encryptedContent) {
       return res.status(400).json({
@@ -52,6 +52,7 @@ export const sendMessage = async (req: Request, res: Response) => {
       receiverId,
       encryptedContent,
       senderEncryptedContent: senderEncryptedContent || encryptedContent,
+      replyToMessageId: replyToMessageId || undefined,
       timestamp: new Date(),
       delivered: false,
       read: false
@@ -85,7 +86,7 @@ export const sendMessage = async (req: Request, res: Response) => {
 
       // Persist + realtime notification from one place to avoid duplicates/missed reload.
       if (mongoose.connection.readyState === 1) {
-        await NotificationService.notifyMessage(
+        void NotificationService.notifyMessage(
           receiverId,
           senderProfile?.name || 'Someone',
           senderId,
@@ -93,7 +94,9 @@ export const sendMessage = async (req: Request, res: Response) => {
             messageId: message._id,
             chatRoomId: roomId
           }
-        );
+        ).catch((notificationError) => {
+          console.error('Notification dispatch error:', notificationError);
+        });
       } else {
         wsServer.emitToUser(receiverId, 'notification:new', {
           type: 'message',
@@ -123,7 +126,9 @@ export const sendMessage = async (req: Request, res: Response) => {
         senderId: message.senderId,
         receiverId: message.receiverId,
         timestamp: message.timestamp,
-        delivered: message.delivered
+        delivered: message.delivered,
+        replyToMessageId: message.replyToMessageId || null,
+        reactions: []
       }
     });
   } catch (error: any) {
@@ -220,10 +225,16 @@ export const getChatHistory = async (req: Request, res: Response) => {
           msg.senderId.toString() === userId
             ? (msg.senderEncryptedContent || msg.encryptedContent)
             : msg.encryptedContent,
+        replyToMessageId: msg.replyToMessageId || null,
         timestamp: msg.timestamp,
         delivered: msg.delivered,
         read: msg.read,
-        deletedForEveryone: msg.deletedForEveryone
+        deletedForEveryone: msg.deletedForEveryone,
+        reactions: (msg.reactions || []).map((reaction: any) => ({
+          userId: reaction.userId,
+          emoji: reaction.emoji,
+          reactedAt: reaction.reactedAt
+        }))
       })),
       total: messages.length,
       hasMore: messages.length === parseInt(limit as string)
@@ -313,6 +324,156 @@ export const getUserChats = async (req: Request, res: Response) => {
       error: {
         code: 'INTERNAL_SERVER_ERROR',
         message: 'An error occurred while fetching chats',
+        timestamp: new Date().toISOString()
+      }
+    });
+  }
+};
+
+export const reactToMessage = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).userId;
+    const { messageId } = req.params;
+    const { emoji } = req.body || {};
+
+    if (!emoji || typeof emoji !== 'string' || !emoji.trim()) {
+      return res.status(400).json({
+        error: {
+          code: 'VALIDATION_ERROR',
+          message: 'Emoji is required',
+          timestamp: new Date().toISOString()
+        }
+      });
+    }
+
+    const normalizedEmoji = emoji.trim().slice(0, 12);
+    const message = await Message.findById(messageId);
+    if (!message) {
+      return res.status(404).json({
+        error: {
+          code: 'MESSAGE_NOT_FOUND',
+          message: 'Message not found',
+          timestamp: new Date().toISOString()
+        }
+      });
+    }
+
+    const isParticipant = await ChatService.isParticipant(message.chatRoomId.toString(), userId);
+    if (!isParticipant) {
+      return res.status(403).json({
+        error: {
+          code: 'FORBIDDEN',
+          message: 'You are not allowed to react to this message',
+          timestamp: new Date().toISOString()
+        }
+      });
+    }
+
+    const existingReaction = (message.reactions || []).find(
+      (reaction: any) => reaction.userId?.toString() === userId
+    );
+    if (existingReaction) {
+      existingReaction.emoji = normalizedEmoji;
+      existingReaction.reactedAt = new Date();
+    } else {
+      (message.reactions as any).push({
+        userId,
+        emoji: normalizedEmoji,
+        reactedAt: new Date()
+      });
+    }
+    await message.save();
+
+    try {
+      const wsServer = getWebSocketServer();
+      wsServer.emitToUsers(
+        [message.senderId.toString(), message.receiverId.toString()],
+        'message:reaction',
+        {
+          messageId: message._id,
+          chatRoomId: message.chatRoomId,
+          reactions: message.reactions
+        }
+      );
+    } catch (wsError) {
+      console.error('Reaction socket emit error:', wsError);
+    }
+
+    return res.json({
+      message: 'Reaction updated',
+      messageId: message._id,
+      reactions: message.reactions
+    });
+  } catch (error: any) {
+    console.error('React to message error:', error);
+    return res.status(500).json({
+      error: {
+        code: 'INTERNAL_SERVER_ERROR',
+        message: 'An error occurred while reacting to message',
+        timestamp: new Date().toISOString()
+      }
+    });
+  }
+};
+
+export const removeReactionFromMessage = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).userId;
+    const { messageId } = req.params;
+
+    const message = await Message.findById(messageId);
+    if (!message) {
+      return res.status(404).json({
+        error: {
+          code: 'MESSAGE_NOT_FOUND',
+          message: 'Message not found',
+          timestamp: new Date().toISOString()
+        }
+      });
+    }
+
+    const isParticipant = await ChatService.isParticipant(message.chatRoomId.toString(), userId);
+    if (!isParticipant) {
+      return res.status(403).json({
+        error: {
+          code: 'FORBIDDEN',
+          message: 'You are not allowed to modify reaction for this message',
+          timestamp: new Date().toISOString()
+        }
+      });
+    }
+
+    message.reactions = (message.reactions || []).filter(
+      (reaction: any) => reaction.userId?.toString() !== userId
+    ) as any;
+    await message.save();
+
+    try {
+      const wsServer = getWebSocketServer();
+      wsServer.emitToUsers(
+        [message.senderId.toString(), message.receiverId.toString()],
+        'message:reaction',
+        {
+          messageId: message._id,
+          chatRoomId: message.chatRoomId,
+          reactions: message.reactions
+        }
+      );
+    } catch (wsError) {
+      console.error('Reaction remove socket emit error:', wsError);
+    }
+
+    return res.json({
+      message: 'Reaction removed',
+      messageId: message._id,
+      reactions: message.reactions
+    });
+  } catch (error: any) {
+    console.error('Remove reaction error:', error);
+    return res.status(500).json({
+      error: {
+        code: 'INTERNAL_SERVER_ERROR',
+        message: 'An error occurred while removing reaction',
         timestamp: new Date().toISOString()
       }
     });

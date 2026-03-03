@@ -1,7 +1,10 @@
 import { useState, useEffect, useRef } from 'react';
-import { io, Socket } from 'socket.io-client';
+import { Socket } from 'socket.io-client';
 import ProfilePreviewModal from './ProfilePreviewModal';
-import { getApiBaseUrl, getWsBaseUrl } from '../utils/runtimeConfig';
+import LoadingDots from './LoadingDots';
+import { getApiBaseUrl } from '../utils/runtimeConfig';
+import { acquireSharedSocket, releaseSharedSocket } from '../utils/socketManager';
+import { incrementPerfMetric } from '../utils/perfMetrics';
 import './RadarView.css';
 
 interface RadarDot {
@@ -36,11 +39,11 @@ interface SelectedRadarUser {
 const RadarView = () => {
   const getStoredVisibilityMode = (): 'explore' | 'vanish' => {
     const savedMode = localStorage.getItem('radarVisibilityMode');
-    return savedMode === 'explore' || savedMode === 'vanish' ? savedMode : 'vanish';
+    return savedMode === 'explore' || savedMode === 'vanish' ? savedMode : 'explore';
   };
 
   const [visibilityMode, setVisibilityMode] = useState<'explore' | 'vanish'>(() => {
-    // Load saved mode from localStorage, default to 'vanish'
+    // Load saved mode from localStorage, default to 'explore'
     return getStoredVisibilityMode();
   });
   const [nearbyUsers, setNearbyUsers] = useState<RadarDot[]>([]);
@@ -50,6 +53,7 @@ const RadarView = () => {
   const [selectedUser, setSelectedUser] = useState<SelectedRadarUser | null>(null);
   const [focusedUserId, setFocusedUserId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [, setLocationIssue] = useState<string>('');
   const [showFilters, setShowFilters] = useState(false);
   const [hoverLabel, setHoverLabel] = useState<HoverLabel | null>(null);
   const [filters, setFilters] = useState<RadarFilters>({
@@ -60,16 +64,18 @@ const RadarView = () => {
   const socketRef = useRef<Socket | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const imageCacheRef = useRef<Map<string, HTMLImageElement | null>>(new Map());
-  const [radarRenderTick, setRadarRenderTick] = useState(0);
-  const locationWatchIdRef = useRef<number | null>(null);
+  const animationFrameRef = useRef<number | null>(null);
   const userLocationRef = useRef<{ lat: number; lng: number } | null>(null);
-  const hasBootstrappedLocationSyncRef = useRef(false);
+  const lastLocationAtRef = useRef(0);
+  const locationRequestInFlightRef = useRef(false);
+  const syncInFlightRef = useRef(false);
+  const lastServerSyncAtRef = useRef(0);
   const touchStartRef = useRef<{ x: number; y: number; time: number } | null>(null);
   const touchMovedRef = useRef(false);
   const lastTouchHandledAtRef = useRef(0);
+  const hasExploreBootstrappedRef = useRef(false);
 
   const API_URL = getApiBaseUrl();
-  const WS_URL = getWsBaseUrl();
 
   const requestCurrentLocation = async (): Promise<{ lat: number; lng: number }> => {
     return new Promise((resolve, reject) => {
@@ -104,15 +110,6 @@ const RadarView = () => {
   }, [userLocation]);
 
   useEffect(() => {
-    if (visibilityMode !== 'explore' || !userLocation) return;
-    if (hasBootstrappedLocationSyncRef.current) return;
-
-    hasBootstrappedLocationSyncRef.current = true;
-    updateLocationOnServer(userLocation);
-    fetchNearbyUsers(userLocation);
-  }, [visibilityMode, userLocation]);
-
-  useEffect(() => {
     const syncVisibilityMode = async () => {
       try {
         const token = localStorage.getItem('token');
@@ -136,92 +133,89 @@ const RadarView = () => {
   }, [API_URL]);
 
   useEffect(() => {
-    const initializeLocation = async () => {
+    const sharedSocket = acquireSharedSocket();
+    if (sharedSocket) {
+      const handleRadarUpdate = () => undefined;
+      const handleNearbyNotification = () => undefined;
+      sharedSocket.on('radar:update', handleRadarUpdate);
+      sharedSocket.on('nearby:notification', handleNearbyNotification);
+      socketRef.current = sharedSocket;
+
+      return () => {
+        sharedSocket.off('radar:update', handleRadarUpdate);
+        sharedSocket.off('nearby:notification', handleNearbyNotification);
+        releaseSharedSocket();
+      };
+    }
+    return () => undefined;
+  }, []);
+
+  useEffect(() => {
+    const syncRadarData = async () => {
+      if (syncInFlightRef.current) return;
+      syncInFlightRef.current = true;
       try {
-        const initialLocation = await requestCurrentLocation();
-        setUserLocation(initialLocation);
-      } catch (error) {
-        console.error('Location error:', error);
-        alert('Location access is required to use Explore Mode. Please enable location permissions.');
+        const currentLocation = userLocationRef.current;
+        if (!currentLocation) return;
+        const now = Date.now();
+        if (now - lastServerSyncAtRef.current > 20000) {
+          await updateLocationOnServer(currentLocation, 'explore');
+          lastServerSyncAtRef.current = now;
+        }
+        await fetchNearbyUsers(currentLocation, { silent: true });
+      } finally {
+        syncInFlightRef.current = false;
       }
     };
 
-    initializeLocation();
+    const onRadarRefresh = () => {
+      if (visibilityMode === 'explore' && userLocationRef.current) {
+        syncRadarData();
+      }
+    };
 
-    if (navigator.geolocation) {
-      locationWatchIdRef.current = navigator.geolocation.watchPosition(
-        (position) => {
-          setUserLocation({
-            lat: position.coords.latitude,
-            lng: position.coords.longitude
-          });
-        },
-        (error) => {
-          console.error('Location watch error:', error);
-        },
-        {
-          enableHighAccuracy: true,
-          maximumAge: 10000,
-          timeout: 15000
-        }
-      );
-    }
+    window.addEventListener('hivemate:radar-refresh', onRadarRefresh as EventListener);
 
-    // Initialize WebSocket
-    const token = localStorage.getItem('token');
-    if (token) {
-      socketRef.current = io(WS_URL, {
-        auth: { token },
-        transports: ['websocket']
-      });
-
-      socketRef.current.on('radar:update', (data: any) => {
-        // Update nearby users from WebSocket
-        console.log('Radar update:', data);
-      });
-
-      socketRef.current.on('nearby:notification', (data: any) => {
-        console.log('Someone nearby:', data);
-      });
+    if (visibilityMode === 'explore' && userLocationRef.current) {
+      syncRadarData();
     }
 
     return () => {
-      if (socketRef.current) {
-        socketRef.current.disconnect();
-      }
-      if (locationWatchIdRef.current !== null && navigator.geolocation) {
-        navigator.geolocation.clearWatch(locationWatchIdRef.current);
-      }
+      window.removeEventListener('hivemate:radar-refresh', onRadarRefresh as EventListener);
     };
-  }, [WS_URL]);
+  }, [visibilityMode, distanceRange]);
 
   useEffect(() => {
-    if (visibilityMode === 'explore') {
-      hasBootstrappedLocationSyncRef.current = false;
-      const syncRadarData = async () => {
-        let currentLocation = userLocationRef.current;
-        if (!currentLocation) return;
-        try {
-          currentLocation = await requestCurrentLocation();
-        } catch (error) {
-          console.error('Using last known location for radar sync:', error);
-        }
-
-        await updateLocationOnServer(currentLocation);
-        await fetchNearbyUsers(currentLocation);
-      };
-
-      syncRadarData();
-
-      // Set up auto-refresh interval (every 10 seconds)
-      const intervalId = setInterval(() => {
-        syncRadarData();
-      }, 10000);
-
-      return () => clearInterval(intervalId);
+    if (visibilityMode !== 'explore') {
+      hasExploreBootstrappedRef.current = false;
+      return;
     }
-    hasBootstrappedLocationSyncRef.current = false;
-  }, [visibilityMode, distanceRange]);
+    if (hasExploreBootstrappedRef.current) return;
+    hasExploreBootstrappedRef.current = true;
+
+    let cancelled = false;
+    const startExploreMode = async () => {
+      try {
+        const freshLocation = userLocationRef.current
+          ? { ...userLocationRef.current }
+          : await requestLocationAccess();
+        if (cancelled) return;
+        await updateLocationOnServer(freshLocation, 'explore');
+        lastServerSyncAtRef.current = Date.now();
+        await fetchNearbyUsers(freshLocation);
+      } catch (error) {
+        if (cancelled) return;
+        console.error('Failed to bootstrap explore mode:', error);
+        setLocationIssue('Location permission is required for Explore Mode.');
+        setNearbyUsers([]);
+      }
+    };
+
+    startExploreMode();
+    return () => {
+      cancelled = true;
+    };
+  }, [visibilityMode]);
 
   useEffect(() => {
     // Apply filters to nearby users
@@ -235,8 +229,32 @@ const RadarView = () => {
   }, [nearbyUsers, filters]);
 
   useEffect(() => {
-    drawRadar();
-  }, [filteredUsers, distanceRange, hoverLabel, focusedUserId, radarRenderTick]);
+    if (visibilityMode !== 'explore') {
+      if (animationFrameRef.current !== null) {
+        window.cancelAnimationFrame(animationFrameRef.current);
+        animationFrameRef.current = null;
+      }
+      return;
+    }
+
+    const animate = () => {
+      incrementPerfMetric('radar_frame_draw');
+      drawRadar();
+      animationFrameRef.current = window.requestAnimationFrame(animate);
+    };
+
+    if (animationFrameRef.current !== null) {
+      window.cancelAnimationFrame(animationFrameRef.current);
+    }
+    animationFrameRef.current = window.requestAnimationFrame(animate);
+
+    return () => {
+      if (animationFrameRef.current !== null) {
+        window.cancelAnimationFrame(animationFrameRef.current);
+        animationFrameRef.current = null;
+      }
+    };
+  }, [filteredUsers, distanceRange, hoverLabel, focusedUserId, userLocation, visibilityMode]);
 
   useEffect(() => {
     if (!focusedUserId) return;
@@ -246,10 +264,15 @@ const RadarView = () => {
     }
   }, [filteredUsers, focusedUserId]);
 
-  const fetchNearbyUsers = async (location = userLocation) => {
+  const fetchNearbyUsers = async (
+    location = userLocation,
+    options: { silent?: boolean } = {}
+  ) => {
     if (!location) return;
 
-    setLoading(true);
+    if (!options.silent) {
+      setLoading(true);
+    }
     try {
       const token = localStorage.getItem('token');
       const radiusInMeters = distanceRange * 1000; // Convert km to meters
@@ -274,16 +297,20 @@ const RadarView = () => {
           photo: user.photo || ''
         }));
         setNearbyUsers(mappedUsers);
-        console.log('Nearby users found:', mappedUsers.length);
       }
     } catch (error) {
       console.error('Failed to fetch nearby users:', error);
     } finally {
-      setLoading(false);
+      if (!options.silent) {
+        setLoading(false);
+      }
     }
   };
 
-  const updateLocationOnServer = async (location = userLocation) => {
+  const updateLocationOnServer = async (
+    location = userLocation,
+    mode: 'explore' | 'vanish' = visibilityMode
+  ) => {
     if (!location) return;
 
     try {
@@ -297,18 +324,16 @@ const RadarView = () => {
         body: JSON.stringify({
           latitude: location.lat,
           longitude: location.lng,
-          mode: visibilityMode
+          mode
         })
       });
-
-      console.log('Location updated:', location, 'Mode:', visibilityMode);
 
       // Emit location update via WebSocket
       if (socketRef.current) {
         socketRef.current.emit('location:update', {
           latitude: location.lat,
           longitude: location.lng,
-          mode: visibilityMode
+          mode
         });
       }
     } catch (error) {
@@ -316,12 +341,70 @@ const RadarView = () => {
     }
   };
 
+  const requestLocationAccess = async (): Promise<{ lat: number; lng: number }> => {
+    const now = Date.now();
+    if (userLocationRef.current && now - lastLocationAtRef.current < 45000) {
+      return userLocationRef.current;
+    }
+    if (locationRequestInFlightRef.current) {
+      if (userLocationRef.current) return userLocationRef.current;
+    }
+
+    locationRequestInFlightRef.current = true;
+    try {
+      const freshLocation = await requestCurrentLocation();
+      setUserLocation(freshLocation);
+      userLocationRef.current = freshLocation;
+      lastLocationAtRef.current = Date.now();
+      setLocationIssue('');
+      return freshLocation;
+    } finally {
+      locationRequestInFlightRef.current = false;
+    }
+  };
+
   const toggleVisibilityMode = async () => {
     const previousMode = visibilityMode;
     const newMode = visibilityMode === 'explore' ? 'vanish' : 'explore';
-    
-    setVisibilityMode(newMode);
+
+    if (newMode === 'vanish') {
+      setVisibilityMode('vanish');
+      setNearbyUsers([]);
+      setHoverLabel(null);
+      setFocusedUserId(null);
+      try {
+        const token = localStorage.getItem('token');
+        const response = await fetch(`${API_URL}/api/location/visibility/mode`, {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`
+          },
+          body: JSON.stringify({ mode: 'vanish' })
+        });
+
+        if (!response.ok) {
+          const data = await response.json().catch(() => null);
+          throw new Error(data?.error?.message || 'Failed to update visibility mode');
+        }
+
+        if (socketRef.current) {
+          socketRef.current.emit('visibility:toggle', { mode: 'vanish' });
+        }
+      } catch (error) {
+        console.error('Failed to toggle visibility:', error);
+        setVisibilityMode(previousMode);
+      }
+      return;
+    }
+
     try {
+      const freshLocation = userLocationRef.current
+        ? { ...userLocationRef.current }
+        : await requestLocationAccess();
+
+      setVisibilityMode('explore');
+
       const token = localStorage.getItem('token');
       const response = await fetch(`${API_URL}/api/location/visibility/mode`, {
         method: 'PUT',
@@ -329,7 +412,7 @@ const RadarView = () => {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`
         },
-        body: JSON.stringify({ mode: newMode })
+        body: JSON.stringify({ mode: 'explore' })
       });
 
       if (!response.ok) {
@@ -339,28 +422,19 @@ const RadarView = () => {
 
       // Emit visibility change via WebSocket
       if (socketRef.current) {
-        socketRef.current.emit('visibility:toggle', { mode: newMode });
+        socketRef.current.emit('visibility:toggle', { mode: 'explore' });
       }
 
-      if (newMode === 'vanish') {
-        setNearbyUsers([]);
-        setHoverLabel(null);
-      }
-
-      if (newMode === 'explore') {
-        try {
-          const freshLocation = await requestCurrentLocation();
-          setUserLocation(freshLocation);
-          await updateLocationOnServer(freshLocation);
-          await fetchNearbyUsers(freshLocation);
-        } catch (locationError) {
-          console.error('Failed to refresh location for explore mode:', locationError);
-        }
-      }
+      await updateLocationOnServer(freshLocation, 'explore');
+      lastServerSyncAtRef.current = Date.now();
+      await fetchNearbyUsers(freshLocation);
     } catch (error) {
       console.error('Failed to toggle visibility:', error);
       setVisibilityMode(previousMode);
-      alert(error instanceof Error ? error.message : 'Failed to toggle visibility mode');
+      setLocationIssue('Location permission is required for Explore Mode.');
+      if (previousMode === 'vanish') {
+        setNearbyUsers([]);
+      }
     }
   };
 
@@ -585,8 +659,6 @@ const RadarView = () => {
       ctx.fillText(label, labelX + paddingX, labelY + 15);
     }
 
-    // Request next frame for continuous scanning animation
-    requestAnimationFrame(drawRadar);
   };
 
   const getAvatarImage = (user: RadarDot): HTMLImageElement | null => {
@@ -600,10 +672,10 @@ const RadarView = () => {
 
     const img = new Image();
     img.crossOrigin = 'anonymous';
-    img.onload = () => setRadarRenderTick((prev) => prev + 1);
+    img.onload = () => drawRadar();
     img.onerror = () => {
       imageCacheRef.current.set(user.userId, null);
-      setRadarRenderTick((prev) => prev + 1);
+      drawRadar();
     };
     img.src = photoUrl;
     imageCacheRef.current.set(user.userId, img);
@@ -909,14 +981,21 @@ const RadarView = () => {
                 className="radar-canvas"
               />
               {loading && (
-                <div className="radar-loading">Updating...</div>
+                <div className="radar-loading">
+                  <LoadingDots label="Updating" />
+                </div>
+              )}
+              {!loading && !userLocation && (
+                <div className="radar-loading">
+                  <LoadingDots label="Starting radar" />
+                </div>
               )}
               {!loading && filteredUsers.length === 0 && nearbyUsers.length > 0 && (
                 <div className="no-users-message">
                   No users match your filters
                 </div>
               )}
-              {!loading && nearbyUsers.length === 0 && (
+              {!loading && userLocation && nearbyUsers.length === 0 && (
                 <div className="no-users-message">
                   No users nearby in explore mode
                 </div>

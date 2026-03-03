@@ -1,6 +1,7 @@
 import { Server as SocketIOServer } from 'socket.io';
 import { Server as HTTPServer } from 'http';
 import { verifyToken } from '../utils/jwt';
+import CallSession from '../models/CallSession';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -10,6 +11,7 @@ const CORS_ORIGIN = process.env.CORS_ORIGIN || '*';
 export class WebSocketServer {
   private io: SocketIOServer;
   private userSockets: Map<string, string> = new Map(); // userId -> socketId
+  private userLastSeen: Map<string, Date> = new Map();
   private normalizeUserId(userId: any): string {
     if (!userId) return '';
     if (typeof userId === 'string') return userId;
@@ -57,14 +59,27 @@ export class WebSocketServer {
 
       // Store user socket mapping
       this.userSockets.set(userId, socket.id);
+      this.userLastSeen.set(userId, new Date());
 
       // Join user's personal room
       socket.join(`user:${userId}`);
+      this.broadcast('presence:update', {
+        userId,
+        online: true,
+        lastSeen: new Date()
+      });
 
       // Handle disconnection
       socket.on('disconnect', () => {
         console.log(`❌ User disconnected: ${userId}`);
         this.userSockets.delete(userId);
+        const lastSeen = new Date();
+        this.userLastSeen.set(userId, lastSeen);
+        this.broadcast('presence:update', {
+          userId,
+          online: false,
+          lastSeen
+        });
       });
 
       // Location update event
@@ -138,8 +153,16 @@ export class WebSocketServer {
         });
       });
 
-      socket.on('call:accept', (data) => {
+      socket.on('call:accept', async (data) => {
         const { callId, initiatorId } = data;
+        try {
+          await CallSession.findByIdAndUpdate(callId, {
+            status: 'active',
+            startedAt: new Date()
+          });
+        } catch (error) {
+          console.error('Failed to mark call active:', error);
+        }
         this.emitToUser(initiatorId, 'call:accepted', {
           callId,
           acceptedBy: userId,
@@ -147,8 +170,16 @@ export class WebSocketServer {
         });
       });
 
-      socket.on('call:reject', (data) => {
+      socket.on('call:reject', async (data) => {
         const { callId, initiatorId, reason } = data;
+        try {
+          await CallSession.findByIdAndUpdate(callId, {
+            status: 'ended',
+            endedAt: new Date()
+          });
+        } catch (error) {
+          console.error('Failed to mark call ended on reject:', error);
+        }
         this.emitToUser(initiatorId, 'call:rejected', {
           callId,
           rejectedBy: userId,
@@ -218,6 +249,19 @@ export class WebSocketServer {
   public isUserConnected(userId: string): boolean {
     const normalizedUserId = this.normalizeUserId(userId);
     return this.userSockets.has(normalizedUserId);
+  }
+
+  public getUserPresence(userId: string): { online: boolean; lastSeen: Date | null } {
+    const normalizedUserId = this.normalizeUserId(userId);
+    if (!normalizedUserId) {
+      return { online: false, lastSeen: null };
+    }
+
+    const online = this.userSockets.has(normalizedUserId);
+    return {
+      online,
+      lastSeen: online ? new Date() : this.userLastSeen.get(normalizedUserId) || null
+    };
   }
 
   /**

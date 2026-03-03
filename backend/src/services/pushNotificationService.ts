@@ -9,10 +9,58 @@ type PushPayload = {
   icon?: string;
   badge?: string;
   notificationType?: 'friend_request' | 'message' | 'call_request';
+  chatRoomId?: string;
+  senderId?: string;
+  data?: {
+    chatRoomId?: string;
+    senderId?: string;
+    notificationType?: 'friend_request' | 'message' | 'call_request';
+    url?: string;
+    sentAt?: number;
+  };
+  sentAt?: number;
 };
 
 class PushNotificationService {
   private static initialized = false;
+
+  private static async sendToSubscription(
+    sub: { endpoint: string; keys: { p256dh: string; auth: string } },
+    payload: PushPayload,
+    options: webpush.RequestOptions,
+    context: string
+  ) {
+    try {
+      const result = await webpush.sendNotification(
+        {
+          endpoint: sub.endpoint,
+          keys: {
+            p256dh: sub.keys.p256dh,
+            auth: sub.keys.auth
+          }
+        },
+        JSON.stringify(payload),
+        options
+      );
+      console.log(`[PUSH SUCCESS][${context}]`, {
+        endpoint: sub.endpoint,
+        statusCode: result?.statusCode
+      });
+    } catch (error: any) {
+      const statusCode = error?.statusCode;
+      const reason = error?.body || error?.message || 'Unknown push error';
+      console.error(`[PUSH FATAL ERROR][${context}]`, {
+        endpoint: sub.endpoint,
+        statusCode,
+        reason
+      });
+
+      if (statusCode === 404 || statusCode === 410 || statusCode === 400) {
+        console.log('[PUSH] Deleting dead subscription', { endpoint: sub.endpoint });
+        await PushSubscription.deleteOne({ endpoint: sub.endpoint });
+      }
+    }
+  }
 
   private static initialize() {
     if (this.initialized) return;
@@ -82,25 +130,15 @@ class PushNotificationService {
 
     await Promise.all(
       subscriptions.map(async (sub) => {
-        try {
-          await webpush.sendNotification(
-            {
-              endpoint: sub.endpoint,
-              keys: {
-                p256dh: sub.keys.p256dh,
-                auth: sub.keys.auth
-              }
-            },
-            JSON.stringify(payload)
-          );
-        } catch (error: any) {
-          const statusCode = error?.statusCode;
-          if (statusCode === 404 || statusCode === 410) {
-            await PushSubscription.deleteOne({ endpoint: sub.endpoint });
-            return;
-          }
-          console.error('Push send failed:', error?.message || error);
-        }
+        await this.sendToSubscription(
+          sub,
+          payload,
+          {
+            TTL: 30,
+            urgency: 'high'
+          },
+          'friend_request'
+        );
       })
     );
   }
@@ -108,13 +146,15 @@ class PushNotificationService {
   static async sendMessagePush(
     recipientUserId: string,
     senderName: string,
-    chatRoomId?: string
+    chatRoomId?: string,
+    senderId?: string
   ) {
     this.initialize();
     if (!this.isConfigured()) return;
 
     const subscriptions = await PushSubscription.find({ userId: recipientUserId }).lean();
     if (!subscriptions.length) return;
+    const sentAt = Date.now();
 
     const payload: PushPayload = {
       title: 'New Message',
@@ -123,30 +163,31 @@ class PushNotificationService {
       tag: chatRoomId ? `chat-${chatRoomId}` : `chat-${recipientUserId}`,
       icon: '/icons.svg',
       badge: '/icons.svg',
-      notificationType: 'message'
+      notificationType: 'message',
+      chatRoomId,
+      senderId,
+      sentAt,
+      data: {
+        url: chatRoomId ? `/chat?room=${encodeURIComponent(chatRoomId)}` : '/chat',
+        notificationType: 'message',
+        chatRoomId,
+        senderId,
+        sentAt
+      }
     };
 
     await Promise.all(
       subscriptions.map(async (sub) => {
-        try {
-          await webpush.sendNotification(
-            {
-              endpoint: sub.endpoint,
-              keys: {
-                p256dh: sub.keys.p256dh,
-                auth: sub.keys.auth
-              }
-            },
-            JSON.stringify(payload)
-          );
-        } catch (error: any) {
-          const statusCode = error?.statusCode;
-          if (statusCode === 404 || statusCode === 410) {
-            await PushSubscription.deleteOne({ endpoint: sub.endpoint });
-            return;
-          }
-          console.error('Push send failed:', error?.message || error);
-        }
+        await this.sendToSubscription(
+          sub,
+          payload,
+          {
+            TTL: 30,
+            urgency: 'high',
+            topic: chatRoomId ? `chat-${chatRoomId}` : `chat-${recipientUserId}`
+          },
+          'message'
+        );
       })
     );
   }
@@ -184,25 +225,16 @@ class PushNotificationService {
 
     await Promise.all(
       subscriptions.map(async (sub) => {
-        try {
-          await webpush.sendNotification(
-            {
-              endpoint: sub.endpoint,
-              keys: {
-                p256dh: sub.keys.p256dh,
-                auth: sub.keys.auth
-              }
-            },
-            JSON.stringify(payload)
-          );
-        } catch (error: any) {
-          const statusCode = error?.statusCode;
-          if (statusCode === 404 || statusCode === 410) {
-            await PushSubscription.deleteOne({ endpoint: sub.endpoint });
-            return;
-          }
-          console.error('Push send failed:', error?.message || error);
-        }
+        await this.sendToSubscription(
+          sub,
+          payload,
+          {
+            TTL: 30,
+            urgency: 'high',
+            topic: `call-${callId}`
+          },
+          'call_request'
+        );
       })
     );
   }

@@ -1,0 +1,202 @@
+.bee-loader {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-height: 240px;
+  border-radius: 18px;
+  background:
+    radial-gradient(circle at 24% 20%, rgba(95, 130, 234, 0.24), transparent 52%),
+    radial-gradient(circle at 78% 75%, rgba(77, 164, 255, 0.16), transparent 48%),
+    linear-gradient(145deg, #06142f 0%, #0b2348 56%, #132f5c 100%);
+  border: 1px solid rgba(138, 171, 234, 0.32);
+}
+
+.bee-loader--compact {
+  min-height: 180px;
+}
+
+.bee-loader--inline {
+  min-height: 96px;
+  border-radius: 14px;
+}
+
+.bee-loader--fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 5000;
+  min-height: 100vh;
+  border-radius: 0;
+  border: none;
+}
+
+.bee-loader__panel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 20px 22px;
+}
+
+.bee-loader--inline .bee-loader__panel {
+  padding: 10px 12px;
+  gap: 6px;
+}
+
+.bee-loader__stage {
+  position: relative;
+  width: 168px;
+  height: 168px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(125, 162, 235, 0.2) 0%, rgba(13, 31, 61, 0.12) 65%, transparent 100%);
+  border: 1px solid rgba(165, 194, 248, 0.24);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  --bee-progress: 0%;
+}
+
+.bee-loader__ring {
+  position: absolute;
+  inset: 5px;
+  border-radius: 50%;
+  background: conic-gradient(
+    from -90deg,
+    rgba(113, 165, 255, 0.98) 0%,
+    rgba(154, 195, 255, 0.95) var(--bee-progress),
+    rgba(117, 153, 219, 0.17) var(--bee-progress),
+    rgba(117, 153, 219, 0.17) 100%
+  );
+  -webkit-mask: radial-gradient(circle, transparent 70%, #000 72%);
+  mask: radial-gradient(circle, transparent 70%, #000 72%);
+  box-shadow: 0 0 20px rgba(108, 157, 253, 0.35);
+}
+
+.bee-loader--inline .bee-loader__stage {
+  width: 76px;
+  height: 76px;
+}
+
+.bee-loader__bee-motion {
+  position: absolute;
+  width: 104px;
+  height: 104px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: bee-jitter 2.2s ease-in-out infinite;
+}
+
+.bee-loader--inline .bee-loader__bee-motion {
+  width: 56px;
+  height: 56px;
+}
+
+.bee-loader__logo {
+  width: 80px;
+  height: 80px;
+  object-fit: contain;
+  filter: drop-shadow(0 6px 18px rgba(126, 160, 244, 0.38));
+  animation: bee-logo-pulse 1.7s ease-in-out infinite;
+}
+
+.bee-loader--inline .bee-loader__logo {
+  width: 46px;
+  height: 46px;
+}
+
+.bee-loader__percent {
+  position: static;
+  font-size: 1.15rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: #e9f3ff;
+  text-shadow: 0 2px 8px rgba(9, 31, 66, 0.44);
+  pointer-events: none;
+  line-height: 1;
+}
+
+.bee-loader--inline .bee-loader__percent {
+  font-size: 0.74rem;
+}
+
+.bee-loader__message {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #d8e9ff;
+  letter-spacing: 0.01em;
+}
+
+.bee-loader--inline .bee-loader__message {
+  font-size: 0.78rem;
+}
+
+@keyframes bee-jitter {
+  0% {
+    transform: translate(0, 0) rotate(0deg) scale(1);
+  }
+  14% {
+    transform: translate(14px, -12px) rotate(6deg) scale(1.03);
+  }
+  28% {
+    transform: translate(-16px, -9px) rotate(-7deg) scale(0.97);
+  }
+  42% {
+    transform: translate(11px, 14px) rotate(5deg) scale(1.02);
+  }
+  56% {
+    transform: translate(-13px, 16px) rotate(-6deg) scale(0.98);
+  }
+  70% {
+    transform: translate(16px, 4px) rotate(7deg) scale(1.03);
+  }
+  84% {
+    transform: translate(-14px, -14px) rotate(-5deg) scale(0.98);
+  }
+  100% {
+    transform: translate(0, 0) rotate(0deg) scale(1);
+  }
+}
+
+@keyframes bee-logo-pulse {
+  0% {
+    transform: scale(0.96);
+    opacity: 0.9;
+  }
+  50% {
+    transform: scale(1.03);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(0.96);
+    opacity: 0.9;
+  }
+}
+
+@media (max-width: 768px) {
+  .bee-loader {
+    min-height: 210px;
+  }
+
+  .bee-loader__stage {
+    width: 146px;
+    height: 146px;
+  }
+
+  .bee-loader__bee-motion {
+    width: 92px;
+    height: 92px;
+  }
+
+  .bee-loader__logo {
+    width: 70px;
+    height: 70px;
+  }
+
+  .bee-loader__percent {
+    font-size: 1.02rem;
+  }
+}

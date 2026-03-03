@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { getApiBaseUrl } from '../utils/runtimeConfig';
+import LoadingDots from './LoadingDots';
 import './GigFeed.css';
 
 interface Gig {
@@ -301,7 +302,9 @@ const GigFeed = ({ onCreateGig }: GigFeedProps) => {
       )}
 
       {loading && page === 1 ? (
-        <div className="gig-loading">Loading opportunities...</div>
+        <div className="gig-loading">
+          <LoadingDots label="Loading opportunities" centered />
+        </div>
       ) : gigs.length === 0 ? (
         <div className="no-gigs">
           <p>No opportunities found</p>
@@ -363,7 +366,11 @@ const GigFeed = ({ onCreateGig }: GigFeedProps) => {
           {/* Infinite scroll trigger */}
           {hasMore && (
             <div ref={observerTarget} className="load-more-trigger">
-              {loading && <div className="loading-more">Loading more...</div>}
+              {loading && (
+                <div className="loading-more">
+                  <LoadingDots label="Loading more" centered />
+                </div>
+              )}
             </div>
           )}
 

@@ -5,7 +5,9 @@ import {
   getUserChats,
   openPersonalChat,
   deleteMessageForMe,
-  deleteMessageForEveryone
+  deleteMessageForEveryone,
+  reactToMessage,
+  removeReactionFromMessage
 } from '../controllers/messageController';
 import { authenticate } from '../middleware/auth';
 
@@ -18,5 +20,7 @@ router.post('/open/:friendId', authenticate, openPersonalChat);
 router.get('/chat/:chatRoomId', authenticate, getChatHistory);
 router.delete('/:messageId/me', authenticate, deleteMessageForMe);
 router.delete('/:messageId/everyone', authenticate, deleteMessageForEveryone);
+router.put('/:messageId/reaction', authenticate, reactToMessage);
+router.delete('/:messageId/reaction', authenticate, removeReactionFromMessage);
 
 export default router;

@@ -2,6 +2,8 @@ import { useState, useEffect, useRef } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import AppContainer from '../components/ui/AppContainer';
 import { getApiBaseUrl } from '../utils/runtimeConfig';
+import BeeLoader from '../components/BeeLoader';
+import useSmoothLoader from '../hooks/useSmoothLoader';
 import './ProfilePage.css';
 
 type RelationshipStatus = 'none' | 'request_sent' | 'request_received' | 'connected' | 'blocked';
@@ -35,6 +37,7 @@ const ProfilePage = () => {
   const [isOwnProfile, setIsOwnProfile] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
   const [loading, setLoading] = useState(true);
+  const { showLoader, complete, handleLoaderComplete } = useSmoothLoader(loading);
   const [formData, setFormData] = useState<any>({});
   const [selectedPhoto, setSelectedPhoto] = useState<string | null>(null);
   const [isPhotoPreviewOpen, setIsPhotoPreviewOpen] = useState(false);
@@ -815,8 +818,8 @@ const ProfilePage = () => {
     }
   };
 
-  if (loading) {
-    return <div className="profile-loading">Loading profile...</div>;
+  if (showLoader) {
+    return <BeeLoader message="Loading profile..." fullscreen complete={complete} onComplete={handleLoaderComplete} />;
   }
 
   if (!profile) {
@@ -883,10 +886,19 @@ const ProfilePage = () => {
 
         <section className="profile-hero">
           <div className="profile-hero-bg"></div>
-          <button
-            type="button"
+          <div
+            role="button"
+            tabIndex={0}
             className="profile-avatar-button"
             onClick={() => {
+              if (!primaryPhoto && !isOwnProfile) return;
+              setSelectedPhoto(primaryPhoto || null);
+              setPendingPhoto(null);
+              setIsPhotoPreviewOpen(true);
+            }}
+            onKeyDown={(e) => {
+              if (e.key !== 'Enter' && e.key !== ' ') return;
+              e.preventDefault();
               if (!primaryPhoto && !isOwnProfile) return;
               setSelectedPhoto(primaryPhoto || null);
               setPendingPhoto(null);
@@ -920,7 +932,7 @@ const ProfilePage = () => {
                 </button>
               )}
             </div>
-          </button>
+          </div>
           <div className="profile-identity">
             <h1>
               {profile.name || 'Unknown User'}

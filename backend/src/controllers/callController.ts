@@ -10,6 +10,9 @@ export const initiateCall = async (req: Request, res: Response) => {
   try {
     const initiatorId = (req as any).userId;
     const { participantId, type } = req.body;
+    const now = new Date();
+    const staleRingingThreshold = new Date(now.getTime() - 70 * 1000); // 70s
+    const staleActiveThreshold = new Date(now.getTime() - 6 * 60 * 60 * 1000); // 6h
 
     if (!participantId || !type) {
       return res.status(400).json({
@@ -57,6 +60,65 @@ export const initiateCall = async (req: Request, res: Response) => {
           }
         });
       }
+    }
+
+    // Cleanup stale sessions first so "user already on another call" is accurate.
+    await CallSession.updateMany(
+      {
+        status: 'ringing',
+        createdAt: { $lt: staleRingingThreshold }
+      },
+      {
+        $set: {
+          status: 'ended',
+          endedAt: now
+        }
+      }
+    );
+
+    await CallSession.updateMany(
+      {
+        status: 'active',
+        startedAt: { $exists: true, $lt: staleActiveThreshold }
+      },
+      {
+        $set: {
+          status: 'ended',
+          endedAt: now
+        }
+      }
+    );
+
+    // Prevent parallel ringing/active calls for either participant.
+    const existingSession = await CallSession.findOne({
+      $and: [
+        {
+          $or: [
+            { status: 'active' },
+            { status: 'ringing', createdAt: { $gte: staleRingingThreshold } }
+          ]
+        },
+        {
+          $or: [
+            { initiatorId, participantIds: participantId },
+            { initiatorId: participantId, participantIds: initiatorId },
+            { initiatorId },
+            { initiatorId: participantId },
+            { participantIds: initiatorId },
+            { participantIds: participantId }
+          ]
+        }
+      ]
+    }).sort({ createdAt: -1 });
+
+    if (existingSession) {
+      return res.status(409).json({
+        error: {
+          code: 'CALL_BUSY',
+          message: 'One of the users is already on another call',
+          timestamp: new Date().toISOString()
+        }
+      });
     }
 
     // Create call session

@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef } from 'react';
-import { io, Socket } from 'socket.io-client';
+import { Socket } from 'socket.io-client';
 import { useNavigate } from 'react-router-dom';
-import { getApiBaseUrl, getWsBaseUrl } from '../utils/runtimeConfig';
-import { ensureFriendRequestPushSubscription } from '../utils/pushNotifications';
+import { getApiBaseUrl } from '../utils/runtimeConfig';
+import { acquireSharedSocket, releaseSharedSocket } from '../utils/socketManager';
 import './NotificationBell.css';
 
 interface Notification {
@@ -77,15 +77,17 @@ const NotificationBell = () => {
   const [unreadCount, setUnreadCount] = useState(0);
   const [isOpen, setIsOpen] = useState(false);
   const socketRef = useRef<Socket | null>(null);
+  const socketHandlersRef = useRef<{
+    connect?: () => void;
+    notification?: (notification: any) => void;
+    disconnect?: () => void;
+  }>({});
   const dropdownRef = useRef<HTMLDivElement>(null);
   const loadNotificationsRef = useRef<() => Promise<void>>(async () => {});
 
   useEffect(() => {
     loadNotifications();
     connectWebSocket();
-    ensureFriendRequestPushSubscription().catch((error) => {
-      console.error('Push subscription setup failed:', error);
-    });
 
     // Close dropdown when clicking outside
     const handleClickOutside = (event: MouseEvent) => {
@@ -98,7 +100,16 @@ const NotificationBell = () => {
     return () => {
       document.removeEventListener('mousedown', handleClickOutside);
       if (socketRef.current) {
-        socketRef.current.disconnect();
+        if (socketHandlersRef.current.connect) {
+          socketRef.current.off('connect', socketHandlersRef.current.connect);
+        }
+        if (socketHandlersRef.current.notification) {
+          socketRef.current.off('notification:new', socketHandlersRef.current.notification);
+        }
+        if (socketHandlersRef.current.disconnect) {
+          socketRef.current.off('disconnect', socketHandlersRef.current.disconnect);
+        }
+        releaseSharedSocket();
         socketRef.current = null;
       }
     };
@@ -110,67 +121,48 @@ const NotificationBell = () => {
     };
 
     window.addEventListener('hivemate:soft-refresh', onSoftRefresh as EventListener);
+    window.addEventListener('hivemate:critical-refresh', onSoftRefresh as EventListener);
     return () => {
       window.removeEventListener('hivemate:soft-refresh', onSoftRefresh as EventListener);
-    };
-  }, []);
-
-  useEffect(() => {
-    const refreshOnResume = () => {
-      if (document.visibilityState === 'visible') {
-        loadNotificationsRef.current();
-      }
-    };
-
-    const refreshOnFocus = () => {
-      loadNotificationsRef.current();
-    };
-
-    const refreshOnOnline = () => {
-      loadNotificationsRef.current();
-    };
-
-    document.addEventListener('visibilitychange', refreshOnResume);
-    window.addEventListener('focus', refreshOnFocus);
-    window.addEventListener('online', refreshOnOnline);
-
-    return () => {
-      document.removeEventListener('visibilitychange', refreshOnResume);
-      window.removeEventListener('focus', refreshOnFocus);
-      window.removeEventListener('online', refreshOnOnline);
+      window.removeEventListener('hivemate:critical-refresh', onSoftRefresh as EventListener);
     };
   }, []);
 
   const connectWebSocket = () => {
-    const token = localStorage.getItem('token');
-    const WS_URL = getWsBaseUrl();
+    const newSocket = acquireSharedSocket();
+    if (!newSocket) return;
 
-    const newSocket = io(WS_URL, {
-      auth: { token },
-      path: '/socket.io',
-      transports: ['websocket', 'polling']
-    });
-
-    newSocket.on('connect', () => {
+    const handleConnect = () => {
       console.log('WebSocket connected for notifications');
       loadNotificationsRef.current();
-    });
+    };
 
-    newSocket.on('notification:new', (notification: any) => {
+    const handleNotification = (notification: any) => {
       console.log('New notification received:', notification);
       const normalized = normalizeNotification(notification);
       setNotifications(prev => {
         const nextKey = getNotificationKey(normalized);
         const exists = prev.some((item) => getNotificationKey(item) === nextKey);
         if (exists) return prev;
+        if (!normalized.read) {
+          setUnreadCount((count) => count + 1);
+        }
         return [normalized, ...prev];
       });
-      setUnreadCount(prev => prev + (normalized.read ? 0 : 1));
-    });
+    };
 
-    newSocket.on('disconnect', () => {
+    const handleDisconnect = () => {
       console.log('WebSocket disconnected');
-    });
+    };
+
+    newSocket.on('connect', handleConnect);
+    newSocket.on('notification:new', handleNotification);
+    newSocket.on('disconnect', handleDisconnect);
+    socketHandlersRef.current = {
+      connect: handleConnect,
+      notification: handleNotification,
+      disconnect: handleDisconnect
+    };
 
     socketRef.current = newSocket;
   };

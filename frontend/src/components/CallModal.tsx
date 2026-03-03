@@ -63,6 +63,8 @@ const CallModal = ({
   const [isMuted, setIsMuted] = useState(false);
   const [isVideoEnabled, setIsVideoEnabled] = useState(callType === 'video');
   const [hasLocalVideoTrack, setHasLocalVideoTrack] = useState(callType === 'video');
+  const [localStream, setLocalStream] = useState<MediaStream | null>(null);
+  const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
   const [selectedOutputMode, setSelectedOutputMode] = useState<OutputMode>('speaker');
   const [audioOutputOptions, setAudioOutputOptions] = useState<OutputOption[]>([
     { mode: 'speaker', label: 'Speaker', sinkId: 'default', available: true },
@@ -76,11 +78,15 @@ const CallModal = ({
   const remoteAudioRef = useRef<HTMLAudioElement>(null);
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
+  const remoteStreamRef = useRef<MediaStream | null>(null);
   const pendingOfferRef = useRef<any | null>(null);
   const pendingIceCandidatesRef = useRef<any[]>([]);
   const hasAcceptedIncomingRef = useRef(!isIncoming);
   const autoAcceptTriggeredRef = useRef(false);
   const audioOutputSupportedRef = useRef(false);
+  const disconnectGraceTimerRef = useRef<number | null>(null);
+  const unansweredTimeoutRef = useRef<number | null>(null);
+  const hasConnectedOnceRef = useRef(false);
   const [audioOutputSupported, setAudioOutputSupported] = useState(false);
 
   const normalizeUserId = (value: any): string => {
@@ -131,19 +137,102 @@ const CallModal = ({
     handleAcceptCall();
   }, [autoAccept, isIncoming, callStatus]);
 
+  useEffect(() => {
+    const videoEl = localVideoRef.current;
+    if (!videoEl || callType !== 'video') return;
+
+    if (localStream && hasLocalVideoTrack) {
+      if (videoEl.srcObject !== localStream) {
+        videoEl.srcObject = localStream;
+      }
+      videoEl
+        .play()
+        .catch(() => undefined);
+      return;
+    }
+
+    if (videoEl.srcObject) {
+      videoEl.srcObject = null;
+    }
+  }, [localStream, hasLocalVideoTrack, callType]);
+
+  useEffect(() => {
+    const audioEl = remoteAudioRef.current;
+    const videoEl = remoteVideoRef.current;
+
+    if (audioEl) {
+      if (remoteStream) {
+        if (audioEl.srcObject !== remoteStream) {
+          audioEl.srcObject = remoteStream;
+        }
+        audioEl.play().catch(() => undefined);
+      } else if (audioEl.srcObject) {
+        audioEl.srcObject = null;
+      }
+    }
+
+    if (videoEl && callType === 'video') {
+      if (remoteStream) {
+        if (videoEl.srcObject !== remoteStream) {
+          videoEl.srcObject = remoteStream;
+        }
+        videoEl
+          .play()
+          .catch(() => undefined);
+      } else if (videoEl.srcObject) {
+        videoEl.srcObject = null;
+      }
+    }
+  }, [remoteStream, callType]);
+
+  useEffect(() => {
+    if (unansweredTimeoutRef.current !== null) {
+      window.clearTimeout(unansweredTimeoutRef.current);
+      unansweredTimeoutRef.current = null;
+    }
+
+    if (callStatus === 'active' || callStatus === 'ended') return;
+
+    if (isIncoming && callStatus === 'ringing') {
+      unansweredTimeoutRef.current = window.setTimeout(() => {
+        if (hasAcceptedIncomingRef.current) return;
+        const initiatorId = normalizeUserId(callerId);
+        if (initiatorId) {
+          socket.emit('call:reject', { callId, initiatorId, reason: 'no_answer' });
+        }
+        setCallStatus('ended');
+        setError('Missed call');
+        setTimeout(() => onReject(), 600);
+      }, 50000);
+      return;
+    }
+
+    if (!isIncoming && callStatus === 'connecting') {
+      unansweredTimeoutRef.current = window.setTimeout(() => {
+        setCallStatus('ended');
+        setError('No answer');
+        setTimeout(() => onEnd(), 600);
+      }, 50000);
+    }
+
+    return () => {
+      if (unansweredTimeoutRef.current !== null) {
+        window.clearTimeout(unansweredTimeoutRef.current);
+        unansweredTimeoutRef.current = null;
+      }
+    };
+  }, [callStatus, isIncoming, callId, callerId, onEnd, onReject, socket]);
+
   const initializeCall = async (): Promise<boolean> => {
     try {
       if (peerConnectionRef.current && localStreamRef.current) return true;
 
       const stream = await getUserMedia();
       localStreamRef.current = stream;
+      setLocalStream(stream);
       const hasVideo = stream.getVideoTracks().length > 0;
       setHasLocalVideoTrack(hasVideo);
       setIsVideoEnabled(hasVideo);
-
-      if (localVideoRef.current && callType === 'video' && hasVideo) {
-        localVideoRef.current.srcObject = stream;
-      }
 
       const peerConnection = createPeerConnection();
       peerConnectionRef.current = peerConnection;
@@ -210,23 +299,59 @@ const CallModal = ({
     };
 
     peerConnection.ontrack = (event) => {
-      if (remoteAudioRef.current) {
-        remoteAudioRef.current.srcObject = event.streams[0];
-        remoteAudioRef.current.play().catch(() => undefined);
+      const incomingStream = event.streams?.[0];
+      if (incomingStream) {
+        remoteStreamRef.current = incomingStream;
+        setRemoteStream(incomingStream);
+        return;
       }
-      if (remoteVideoRef.current) {
-        remoteVideoRef.current.srcObject = event.streams[0];
+
+      if (!remoteStreamRef.current) {
+        remoteStreamRef.current = new MediaStream();
       }
+      remoteStreamRef.current.addTrack(event.track);
+      setRemoteStream(remoteStreamRef.current);
     };
 
     peerConnection.onconnectionstatechange = () => {
       const state = peerConnection.connectionState;
       if (state === 'connected') {
+        hasConnectedOnceRef.current = true;
+        if (disconnectGraceTimerRef.current !== null) {
+          window.clearTimeout(disconnectGraceTimerRef.current);
+          disconnectGraceTimerRef.current = null;
+        }
         setCallStatus('active');
         return;
       }
-      if (state === 'failed' || state === 'disconnected' || state === 'closed') {
+      if (state === 'disconnected') {
+        if (!hasConnectedOnceRef.current) return;
+        if (disconnectGraceTimerRef.current !== null) {
+          window.clearTimeout(disconnectGraceTimerRef.current);
+        }
+        disconnectGraceTimerRef.current = window.setTimeout(() => {
+          const currentState = peerConnectionRef.current?.connectionState;
+          if (currentState === 'disconnected') {
+            handleCallEnded({ callId });
+          }
+        }, 8000);
+        return;
+      }
+      if (state === 'failed' || state === 'closed') {
         handleCallEnded();
+      }
+    };
+
+    peerConnection.oniceconnectionstatechange = () => {
+      const iceState = peerConnection.iceConnectionState;
+      if (iceState === 'connected' || iceState === 'completed') {
+        hasConnectedOnceRef.current = true;
+        if (disconnectGraceTimerRef.current !== null) {
+          window.clearTimeout(disconnectGraceTimerRef.current);
+          disconnectGraceTimerRef.current = null;
+        }
+      } else if (iceState === 'failed') {
+        handleCallEnded({ callId });
       }
     };
 
@@ -323,6 +448,7 @@ const CallModal = ({
   };
 
   const handleOffer = async (data: any) => {
+    if (String(data?.callId || '') !== String(callId)) return;
     if (isIncoming && !hasAcceptedIncomingRef.current) {
       pendingOfferRef.current = data;
       return;
@@ -331,6 +457,7 @@ const CallModal = ({
   };
 
   const handleAnswer = async (data: any) => {
+    if (String(data?.callId || '') !== String(callId)) return;
     try {
       if (!peerConnectionRef.current) return;
       await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(data.answer));
@@ -355,6 +482,7 @@ const CallModal = ({
   };
 
   const handleIceCandidate = async (data: any) => {
+    if (String(data?.callId || '') !== String(callId)) return;
     try {
       if (!peerConnectionRef.current) {
         pendingIceCandidatesRef.current.push(data.candidate);
@@ -370,7 +498,8 @@ const CallModal = ({
     }
   };
 
-  const handleCallAccepted = async () => {
+  const handleCallAccepted = async (data?: any) => {
+    if (String(data?.callId || '') !== String(callId)) return;
     setCallStatus('connecting');
     if (!isIncoming && peerConnectionRef.current?.localDescription?.type === 'offer') {
       try {
@@ -389,26 +518,44 @@ const CallModal = ({
   };
 
   const handleCallRejected = (data?: any) => {
+    if (String(data?.callId || '') !== String(callId)) return;
     setCallStatus('ended');
-    setError(data?.reason === 'busy' ? 'User is busy on another call' : 'Call was declined');
+    if (data?.reason === 'busy') {
+      setError('User is busy on another call');
+    } else if (data?.reason === 'no_answer') {
+      setError('No answer');
+    } else {
+      setError('Call was declined');
+    }
     setTimeout(() => onReject(), 1200);
   };
 
-  const handleCallEnded = () => {
+  const handleCallEnded = (data?: any) => {
+    if (data?.callId && String(data.callId) !== String(callId)) return;
     setCallStatus('ended');
     cleanup();
     setTimeout(() => onEnd(), 800);
   };
 
   const handleAcceptCall = async () => {
-    onAccept();
-    const initiatorId = normalizeUserId(callerId);
-    socket.emit('call:accept', { callId, initiatorId });
     hasAcceptedIncomingRef.current = true;
     setCallStatus('connecting');
 
     const ok = await initializeCall();
-    if (!ok) return;
+    if (!ok) {
+      hasAcceptedIncomingRef.current = false;
+      const initiatorId = normalizeUserId(callerId);
+      if (initiatorId) {
+        socket.emit('call:reject', { callId, initiatorId, reason: 'media_failed' });
+      }
+      setCallStatus('ended');
+      setTimeout(() => onReject(), 700);
+      return;
+    }
+
+    onAccept();
+    const initiatorId = normalizeUserId(callerId);
+    socket.emit('call:accept', { callId, initiatorId });
 
     if (pendingOfferRef.current) {
       await processOffer(pendingOfferRef.current);
@@ -445,9 +592,30 @@ const CallModal = ({
   };
 
   const cleanup = () => {
+    hasConnectedOnceRef.current = false;
+    if (unansweredTimeoutRef.current !== null) {
+      window.clearTimeout(unansweredTimeoutRef.current);
+      unansweredTimeoutRef.current = null;
+    }
+    if (disconnectGraceTimerRef.current !== null) {
+      window.clearTimeout(disconnectGraceTimerRef.current);
+      disconnectGraceTimerRef.current = null;
+    }
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach((track) => track.stop());
       localStreamRef.current = null;
+    }
+    setLocalStream(null);
+    setRemoteStream(null);
+    remoteStreamRef.current = null;
+    if (localVideoRef.current) {
+      localVideoRef.current.srcObject = null;
+    }
+    if (remoteVideoRef.current) {
+      remoteVideoRef.current.srcObject = null;
+    }
+    if (remoteAudioRef.current) {
+      remoteAudioRef.current.srcObject = null;
     }
     if (peerConnectionRef.current) {
       peerConnectionRef.current.close();

@@ -1,7 +1,15 @@
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { getApiBaseUrl } from '../utils/runtimeConfig';
+import BeeLoader from '../components/BeeLoader';
+import useSmoothLoader from '../hooks/useSmoothLoader';
 import './GigDetailPage.css';
+
+const BackIcon = () => (
+  <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <path d="M15 5L8 12L15 19" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
 
 interface Gig {
   _id: string;
@@ -46,6 +54,7 @@ const GigDetailPage = () => {
   const [gig, setGig] = useState<Gig | null>(null);
   const [applications, setApplications] = useState<Application[]>([]);
   const [loading, setLoading] = useState(true);
+  const { showLoader, complete, handleLoaderComplete } = useSmoothLoader(loading);
   const [applying, setApplying] = useState(false);
   const [showApplyModal, setShowApplyModal] = useState(false);
   const [coverLetter, setCoverLetter] = useState('');
@@ -241,10 +250,10 @@ const GigDetailPage = () => {
     }
   };
 
-  if (loading) {
+  if (showLoader) {
     return (
       <div className="gig-detail-page">
-        <div className="loading">Loading...</div>
+        <BeeLoader message="Loading opportunity..." compact complete={complete} onComplete={handleLoaderComplete} />
       </div>
     );
   }
@@ -256,8 +265,8 @@ const GigDetailPage = () => {
   return (
     <div className="gig-detail-page">
       <div className="gig-detail-container">
-        <button className="back-button" onClick={() => navigate(-1)}>
-          ← Back
+        <button className="back-button" onClick={() => navigate(-1)} aria-label="Go back">
+          <BackIcon />
         </button>
 
         <div className="gig-detail-header">

@@ -11,6 +11,34 @@ const urlBase64ToUint8Array = (base64String: string) => {
   return outputArray;
 };
 
+const postSubscriptionToBackend = async (subscription: PushSubscription, token: string) => {
+  const API_URL = getApiBaseUrl();
+  await fetch(`${API_URL}/api/push/subscribe`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`
+    },
+    body: JSON.stringify(subscription)
+  });
+};
+
+export const syncExistingPushSubscription = async () => {
+  if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) {
+    return;
+  }
+
+  const token = localStorage.getItem('token');
+  if (!token) return;
+  if (Notification.permission !== 'granted') return;
+
+  const registration = await navigator.serviceWorker.ready;
+  const subscription = await registration.pushManager.getSubscription();
+  if (!subscription) return;
+
+  await postSubscriptionToBackend(subscription, token);
+};
+
 export const ensureFriendRequestPushSubscription = async () => {
   if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) {
     return;
@@ -42,12 +70,5 @@ export const ensureFriendRequestPushSubscription = async () => {
     });
   }
 
-  await fetch(`${API_URL}/api/push/subscribe`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${token}`
-    },
-    body: JSON.stringify(subscription)
-  });
+  await postSubscriptionToBackend(subscription, token);
 };

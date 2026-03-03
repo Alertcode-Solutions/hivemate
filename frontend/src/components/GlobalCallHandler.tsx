@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { io, Socket } from 'socket.io-client';
+import { Socket } from 'socket.io-client';
 import CallModal from './CallModal';
-import { getApiBaseUrl, getWsBaseUrl } from '../utils/runtimeConfig';
-import { ensureFriendRequestPushSubscription } from '../utils/pushNotifications';
+import { getApiBaseUrl } from '../utils/runtimeConfig';
+import { acquireSharedSocket, releaseSharedSocket } from '../utils/socketManager';
 
 type ActiveCall = {
   callId: string;
@@ -30,44 +30,34 @@ const GlobalCallHandler = () => {
   const [activeCall, setActiveCall] = useState<ActiveCall | null>(null);
   const [showCallModal, setShowCallModal] = useState(false);
   const [autoAcceptIncoming, setAutoAcceptIncoming] = useState(false);
-  const currentPathRef = useRef(location.pathname);
   const hasActiveCallRef = useRef(false);
-
-  useEffect(() => {
-    currentPathRef.current = location.pathname;
-  }, [location.pathname]);
+  const activeCallIdRef = useRef<string>('');
 
   useEffect(() => {
     hasActiveCallRef.current = showCallModal && Boolean(activeCall);
+    activeCallIdRef.current = activeCall?.callId || '';
     (window as any).__hivemateCallOverlayActive = hasActiveCallRef.current;
   }, [showCallModal, activeCall]);
 
   useEffect(() => {
-    const token = localStorage.getItem('token');
-    if (!token) return;
+    const socket = acquireSharedSocket();
+    if (!socket) return;
 
-    ensureFriendRequestPushSubscription().catch((error) => {
-      console.error('Push subscription setup failed:', error);
-    });
+    const handleIncomingCall = (data: any) => {
+      const incomingCallId = String(data?.callId || '');
+      if (!incomingCallId) return;
 
-    const WS_URL = getWsBaseUrl();
-    const socket = io(WS_URL, {
-      auth: { token },
-      path: '/socket.io',
-      transports: ['websocket', 'polling'],
-      reconnection: true,
-      reconnectionAttempts: 20,
-      reconnectionDelay: 500
-    });
+      // Ignore duplicate events for the currently active call.
+      if (activeCallIdRef.current && activeCallIdRef.current === incomingCallId) {
+        return;
+      }
 
-    socket.on('call:incoming', (data: any) => {
-      // Chat page already handles call lifecycle and modal.
-      if (currentPathRef.current.startsWith('/chat')) return;
-      if (hasActiveCallRef.current) {
+      const anyOverlayActive = Boolean((window as any).__hivemateCallOverlayActive);
+      if (hasActiveCallRef.current || anyOverlayActive) {
         const initiatorId = normalizeId(data.initiatorId);
         if (initiatorId) {
           socket.emit('call:reject', {
-            callId: data.callId,
+            callId: incomingCallId,
             initiatorId,
             reason: 'busy'
           });
@@ -75,7 +65,7 @@ const GlobalCallHandler = () => {
         return;
       }
       setActiveCall({
-        callId: String(data.callId),
+        callId: incomingCallId,
         type: data.type === 'video' ? 'video' : 'voice',
         isIncoming: true,
         callerName: data.initiatorName || 'Unknown',
@@ -83,13 +73,16 @@ const GlobalCallHandler = () => {
       });
       setAutoAcceptIncoming(false);
       setShowCallModal(true);
-    });
+    };
+
+    socket.on('call:incoming', handleIncomingCall);
 
     socketRef.current = socket;
 
     return () => {
       (window as any).__hivemateCallOverlayActive = false;
-      socket.disconnect();
+      socket.off('call:incoming', handleIncomingCall);
+      releaseSharedSocket();
       socketRef.current = null;
     };
   }, []);

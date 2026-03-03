@@ -1,11 +1,12 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { io, type Socket } from 'socket.io-client';
 import { getApiBaseUrl } from '../utils/runtimeConfig';
-import { getWsBaseUrl } from '../utils/runtimeConfig';
+import { acquireSharedSocket, releaseSharedSocket } from '../utils/socketManager';
 import AppContainer from '../components/ui/AppContainer';
 import PageHeader from '../components/ui/PageHeader';
 import { goToProfile } from '../utils/profileRouting';
+import BeeLoader from '../components/BeeLoader';
+import useSmoothLoader from '../hooks/useSmoothLoader';
 import './ConnectionsPage.css';
 
 interface ConnectionRequest {
@@ -33,9 +34,9 @@ const ConnectionsPage = () => {
   const [sent, setSent] = useState<ConnectionRequest[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'received' | 'sent'>('received');
+  const { showLoader, complete, handleLoaderComplete } = useSmoothLoader(loading);
 
   const API_URL = getApiBaseUrl();
-  const WS_URL = getWsBaseUrl();
 
   useEffect(() => {
     fetchRequests();
@@ -53,34 +54,29 @@ const ConnectionsPage = () => {
   }, []);
 
   useEffect(() => {
-    const token = localStorage.getItem('token');
-    if (!token) return;
-
-    const socket: Socket = io(WS_URL, {
-      auth: { token },
-      path: '/socket.io',
-      transports: ['websocket', 'polling']
-    });
+    const socket = acquireSharedSocket();
+    if (!socket) return;
 
     const refresh = () => {
       fetchRequests();
     };
-
-    socket.on('connections:pending_updated', refresh);
-    socket.on('friendship:established', refresh);
-    socket.on('notification:new', (notification: any) => {
+    const onNotification = (notification: any) => {
       if (notification?.type === 'friend_request' || notification?.type === 'friend_accepted') {
         refresh();
       }
-    });
+    };
+
+    socket.on('connections:pending_updated', refresh);
+    socket.on('friendship:established', refresh);
+    socket.on('notification:new', onNotification);
 
     return () => {
       socket.off('connections:pending_updated', refresh);
       socket.off('friendship:established', refresh);
-      socket.off('notification:new');
-      socket.disconnect();
+      socket.off('notification:new', onNotification);
+      releaseSharedSocket();
     };
-  }, [WS_URL]);
+  }, []);
 
   const fetchRequests = async () => {
     try {
@@ -134,6 +130,10 @@ const ConnectionsPage = () => {
   };
 
   const getInitial = (name?: string) => (name?.charAt(0).toUpperCase() || 'U');
+
+  if (showLoader) {
+    return <BeeLoader message="Loading requests..." fullscreen complete={complete} onComplete={handleLoaderComplete} />;
+  }
 
   const renderReceived = () => {
     if (received.length === 0) {
@@ -270,13 +270,9 @@ const ConnectionsPage = () => {
             </button>
           </div>
 
-          {loading ? (
-            <div className="connections-loading">Loading requests...</div>
-          ) : (
-            <div className="requests-list">
-              {activeTab === 'received' ? renderReceived() : renderSent()}
-            </div>
-          )}
+          <div className="requests-list">
+            {activeTab === 'received' ? renderReceived() : renderSent()}
+          </div>
         </div>
       </AppContainer>
     </div>
