@@ -6,6 +6,7 @@ import LoadingDots from './LoadingDots';
 import { getApiBaseUrl } from '../utils/runtimeConfig';
 import { acquireSharedSocket, releaseSharedSocket } from '../utils/socketManager';
 import { incrementPerfMetric } from '../utils/perfMetrics';
+import { fetchJsonCached, invalidateApiCacheByUrl } from '../utils/apiCache';
 import './RadarView.css';
 
 interface RadarDot {
@@ -432,16 +433,24 @@ const RadarView = () => {
         const token = localStorage.getItem('token');
         if (!token) return;
 
-        const response = await fetch(`${API_URL}/api/location/visibility/mode`, {
-          headers: { Authorization: `Bearer ${token}` }
-        });
+        const data = await fetchJsonCached<any>(
+          `${API_URL}/api/location/visibility/mode`,
+          {
+            headers: { Authorization: `Bearer ${token}` }
+          },
+          {
+            ttlMs: 15000
+          }
+        );
 
-      if (!response.ok) return;
-      const data = await response.json();
-      if (data.mode === 'explore' || data.mode === 'vanish') {
-        setVisibilityMode(data.mode);
-      }
-    } catch (error) {
+        if (data.mode === 'explore' || data.mode === 'vanish') {
+          setVisibilityMode(data.mode);
+        }
+      } catch (error: any) {
+        if (error?.status === 401) {
+          handleUnauthorized();
+          return;
+        }
       logRadarError('syncVisibilityMode', error);
     }
   };
@@ -637,35 +646,36 @@ const RadarView = () => {
       nearbyFetchAbortRef.current?.abort();
       const controller = new AbortController();
       nearbyFetchAbortRef.current = controller;
-      const response = await fetch(
+      const data = await fetchJsonCached<any>(
         `${API_URL}/api/location/nearby?lat=${location.lat}&lng=${location.lng}&radius=${radiusInMeters}`,
         {
           headers: { Authorization: `Bearer ${token}` },
           signal: controller.signal
+        },
+        {
+          ttlMs: 10000
         }
       );
-
-      if (response.ok) {
-        const data = await response.json();
-        const users = data.nearbyUsers || [];
-        // Map the response to match RadarDot interface
-        const mappedUsers = users.map((user: any) => ({
-          userId: user.userId,
-          latitude: user.coordinates?.latitude || 0,
-          longitude: user.coordinates?.longitude || 0,
-          distance: user.distance || 0,
-          gender: user.gender,
-          name: user.name,
-          photo: user.photo || ''
-        }));
-        nearbyResponseCacheRef.current.set(cacheKey, { at: now, users: mappedUsers });
-        setNearbyUsers(mappedUsers);
-        setHasFetchedNearbyOnce(true);
-      } else if (response.status === 401) {
-        handleUnauthorized();
-      }
-    } catch (error) {
+      const users = data.nearbyUsers || [];
+      // Map the response to match RadarDot interface
+      const mappedUsers = users.map((user: any) => ({
+        userId: user.userId,
+        latitude: user.coordinates?.latitude || 0,
+        longitude: user.coordinates?.longitude || 0,
+        distance: user.distance || 0,
+        gender: user.gender,
+        name: user.name,
+        photo: user.photo || ''
+      }));
+      nearbyResponseCacheRef.current.set(cacheKey, { at: now, users: mappedUsers });
+      setNearbyUsers(mappedUsers);
+      setHasFetchedNearbyOnce(true);
+    } catch (error: any) {
       if (error instanceof DOMException && error.name === 'AbortError') {
+        return;
+      }
+      if (error?.status === 401) {
+        handleUnauthorized();
         return;
       }
       logRadarError('fetchNearbyUsers', error, {
@@ -782,6 +792,8 @@ const RadarView = () => {
           throw new Error(data?.error?.message || 'Failed to update visibility mode');
         }
 
+        invalidateApiCacheByUrl('/api/location/visibility/mode');
+        invalidateApiCacheByUrl('/api/location/nearby');
         if (socketRef.current) {
           socketRef.current.emit('visibility:toggle', { mode: 'vanish' });
         }
@@ -818,6 +830,8 @@ const RadarView = () => {
         throw new Error(data?.error?.message || 'Failed to update visibility mode');
       }
 
+      invalidateApiCacheByUrl('/api/location/visibility/mode');
+      invalidateApiCacheByUrl('/api/location/nearby');
       // Emit visibility change via WebSocket
       if (socketRef.current) {
         socketRef.current.emit('visibility:toggle', { mode: 'explore' });

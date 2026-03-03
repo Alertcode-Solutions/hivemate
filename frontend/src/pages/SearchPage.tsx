@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { getApiBaseUrl } from '../utils/runtimeConfig';
 import { goToProfile, resolveProfileTarget } from '../utils/profileRouting';
+import { fetchJsonCached } from '../utils/apiCache';
 import LoadingDots from '../components/LoadingDots';
 import './SearchPage.css';
 
@@ -170,17 +171,20 @@ const SearchPage = () => {
       if (filters.profession.trim()) body.profession = filters.profession.trim();
       if (filters.locations.length > 0) body.locations = filters.locations;
 
-      const response = await fetch(`${API_URL}/api/search/profiles`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`
+      const data = await fetchJsonCached<any>(
+        `${API_URL}/api/search/profiles`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`
+          },
+          body: JSON.stringify(body)
         },
-        body: JSON.stringify(body)
-      });
-
-      if (!response.ok) throw new Error('Profile search failed');
-      const data = await response.json();
+        {
+          ttlMs: 20000
+        }
+      );
       const incomingProfiles = Array.isArray(data.profiles) ? data.profiles : [];
       const filteredProfiles = incomingProfiles.filter((profile: Profile) => String(profile.userId) !== currentUserId);
       setProfileResults(filteredProfiles);
@@ -423,6 +427,7 @@ const SearchPage = () => {
                 <div className="skill-input-container">
                   <input
                     type="text"
+                    className="filter-text-input"
                     placeholder="Add skill"
                     value={skillInput}
                     onChange={(e) => handleSkillInput(e.target.value)}
@@ -456,6 +461,7 @@ const SearchPage = () => {
                 <label>Profession</label>
                 <input
                   type="text"
+                  className="filter-text-input"
                   placeholder="Role"
                   value={filters.profession}
                   onChange={(e) => setFilters((prev) => ({ ...prev, profession: e.target.value }))}
@@ -467,6 +473,7 @@ const SearchPage = () => {
                 <div className="skill-input-container">
                   <input
                     type="text"
+                    className="filter-text-input"
                     placeholder="Add location"
                     value={locationInput}
                     onChange={(e) => handleLocationInput(e.target.value)}

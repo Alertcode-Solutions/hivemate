@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import AppContainer from '../components/ui/AppContainer';
 import { getApiBaseUrl } from '../utils/runtimeConfig';
+import { fetchJsonCached, invalidateApiCacheByUrl } from '../utils/apiCache';
 import BeeLoader from '../components/BeeLoader';
 import useSmoothLoader from '../hooks/useSmoothLoader';
 import './ProfilePage.css';
@@ -122,6 +123,7 @@ const TrashIcon = () => (
 
 const ProfilePage = () => {
   const navigate = useNavigate();
+  const location = useLocation();
   const { userId: paramUserId } = useParams();
   const [profile, setProfile] = useState<any>(null);
   const [isOwnProfile, setIsOwnProfile] = useState(false);
@@ -393,7 +395,11 @@ const ProfilePage = () => {
     };
   }, [isCoverCropOpen, coverCropSource, coverImageSize, coverCropZoom, coverCropX, coverCropY]);
 
-  const fetchRelationship = async (targetUserId: string, profileAccessLevel?: string) => {
+  const fetchRelationship = async (
+    targetUserId: string,
+    profileAccessLevel?: string,
+    forceRefresh = false
+  ) => {
     try {
       const token = localStorage.getItem('token');
       if (!token || !targetUserId) return;
@@ -401,15 +407,36 @@ const ProfilePage = () => {
       setRelationshipError('');
 
       const [pendingResult, friendsResult, friendshipStatusResult] = await Promise.allSettled([
-        fetch(`${API_URL}/api/connections/pending`, {
-          headers: { Authorization: `Bearer ${token}` }
-        }),
-        fetch(`${API_URL}/api/friends`, {
-          headers: { Authorization: `Bearer ${token}` }
-        }),
-        fetch(`${API_URL}/api/friends/status/${targetUserId}`, {
-          headers: { Authorization: `Bearer ${token}` }
-        })
+        fetchJsonCached<any>(
+          `${API_URL}/api/connections/pending`,
+          {
+            headers: { Authorization: `Bearer ${token}` }
+          },
+          {
+            ttlMs: 15000,
+            forceRefresh
+          }
+        ),
+        fetchJsonCached<any>(
+          `${API_URL}/api/friends`,
+          {
+            headers: { Authorization: `Bearer ${token}` }
+          },
+          {
+            ttlMs: 15000,
+            forceRefresh
+          }
+        ),
+        fetchJsonCached<any>(
+          `${API_URL}/api/friends/status/${targetUserId}`,
+          {
+            headers: { Authorization: `Bearer ${token}` }
+          },
+          {
+            ttlMs: 10000,
+            forceRefresh
+          }
+        )
       ]);
 
       let resolvedStatus: RelationshipStatus = 'none';
@@ -419,8 +446,8 @@ const ProfilePage = () => {
         [targetUserId, paramUserId, profile?.userId, profile?.id].filter(Boolean).map((value) => normalizeId(value))
       );
 
-      if (friendsResult.status === 'fulfilled' && friendsResult.value.ok) {
-        const friendsData = await friendsResult.value.json();
+      if (friendsResult.status === 'fulfilled') {
+        const friendsData = friendsResult.value;
         const matchedFriendship = (friendsData.friends || []).find(
           (friend: any) => candidateIds.has(normalizeId(friend.friendId))
         );
@@ -433,8 +460,8 @@ const ProfilePage = () => {
         resolvedStatus = 'connected';
       }
 
-      if (resolvedStatus !== 'connected' && pendingResult.status === 'fulfilled' && pendingResult.value.ok) {
-        const pendingData = await pendingResult.value.json();
+      if (resolvedStatus !== 'connected' && pendingResult.status === 'fulfilled') {
+        const pendingData = pendingResult.value;
         const sentMatch = (pendingData.sent || []).find(
           (req: any) => candidateIds.has(normalizeId(req.receiverId))
         );
@@ -451,8 +478,8 @@ const ProfilePage = () => {
         }
       }
 
-      if (friendshipStatusResult.status === 'fulfilled' && friendshipStatusResult.value.ok) {
-        const friendshipStatus = await friendshipStatusResult.value.json();
+      if (friendshipStatusResult.status === 'fulfilled') {
+        const friendshipStatus = friendshipStatusResult.value;
         if (friendshipStatus?.status === 'blocked') {
           resolvedStatus = 'blocked';
           setBlockedBySelf(Boolean(friendshipStatus?.blockedBySelf));
@@ -466,7 +493,11 @@ const ProfilePage = () => {
       setRelationshipStatus(resolvedStatus);
       setSentRequestId(resolvedSentRequestId);
       setJustSentRequest(false);
-    } catch (error) {
+    } catch (error: any) {
+      if (error?.status === 401) {
+        handleUnauthorized();
+        return;
+      }
       console.error('Failed to fetch relationship:', error);
       setRelationshipError('Failed to load connection status.');
     } finally {
@@ -474,24 +505,28 @@ const ProfilePage = () => {
     }
   };
 
-  const fetchMatchStatus = async (targetUserId: string) => {
+  const fetchMatchStatus = async (targetUserId: string, forceRefresh = false) => {
     try {
       const token = localStorage.getItem('token');
       if (!token || !targetUserId) return;
       setMatchLoading(true);
       setMatchError('');
-      const response = await fetch(`${API_URL}/api/match/status/${targetUserId}`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-
-      if (!response.ok) {
-        const data = await response.json().catch(() => ({}));
-        throw new Error(data?.error?.message || 'Failed to load match status');
-      }
-
-      const data = await response.json();
+      const data = await fetchJsonCached<any>(
+        `${API_URL}/api/match/status/${targetUserId}`,
+        {
+          headers: { Authorization: `Bearer ${token}` }
+        },
+        {
+          ttlMs: 10000,
+          forceRefresh
+        }
+      );
       setMatchStatus(data);
     } catch (error: any) {
+      if (error?.status === 401) {
+        handleUnauthorized();
+        return;
+      }
       setMatchStatus(null);
       setMatchError(error?.message || 'Failed to load match status');
     } finally {
@@ -499,19 +534,23 @@ const ProfilePage = () => {
     }
   };
 
-  const fetchProfile = async (userId: string) => {
+  const fetchProfile = async (userId: string, forceRefresh = false) => {
     try {
       const token = localStorage.getItem('token');
       if (!token) {
         handleUnauthorized();
         return;
       }
-      const response = await fetch(`${API_URL}/api/profiles/${userId}`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-
-      if (response.ok) {
-        const data = await response.json();
+      const data = await fetchJsonCached<any>(
+        `${API_URL}/api/profiles/${userId}`,
+        {
+          headers: { Authorization: `Bearer ${token}` }
+        },
+        {
+          ttlMs: 30000,
+          forceRefresh
+        }
+      );
         const resolvedAccessLevel = data.accessLevel || '';
         const normalizedProfile = {
           ...data.profile,
@@ -532,16 +571,17 @@ const ProfilePage = () => {
         setMutualFriends(Array.isArray(data.mutualFriends) ? data.mutualFriends : []);
 
         if (!resolvedIsOwn) {
-          await fetchRelationship(userId, resolvedAccessLevel);
-          await fetchMatchStatus(userId);
+          await fetchRelationship(userId, resolvedAccessLevel, forceRefresh);
+          await fetchMatchStatus(userId, forceRefresh);
         } else {
           setRelationshipStatus('connected');
           setMatchStatus(null);
         }
-      } else if (response.status === 401) {
+    } catch (error: any) {
+      if (error?.status === 401) {
         handleUnauthorized();
+        return;
       }
-    } catch (error) {
       console.error('Failed to fetch profile:', error);
     } finally {
       setLoading(false);
@@ -631,6 +671,7 @@ const ProfilePage = () => {
       photos: toSinglePhotoArray(data.profile?.photos),
       coverPhoto: data.profile?.coverPhoto || ''
     };
+    invalidateApiCacheByUrl('/api/profiles/');
     setProfile(normalizedProfile);
     setFormData(normalizedProfile);
     return normalizedProfile;
@@ -823,7 +864,9 @@ const ProfilePage = () => {
   const openChatWithUser = () => {
     const targetUserId = normalizeId(profile?.userId || paramUserId);
     if (!targetUserId) return;
-    navigate(`/chat?user=${encodeURIComponent(targetUserId)}`);
+    navigate(`/chat?user=${encodeURIComponent(targetUserId)}`, {
+      state: { from: `${location.pathname}${location.search}` }
+    });
   };
 
   const openFriendList = () => {
@@ -858,12 +901,18 @@ const ProfilePage = () => {
           message.toLowerCase().includes('already friends')
         ) {
           setRelationshipStatus('connected');
-          await fetchRelationship(String(targetUserId), accessLevel);
+          invalidateApiCacheByUrl('/api/connections/pending');
+          invalidateApiCacheByUrl('/api/friends');
+          invalidateApiCacheByUrl('/api/friends/status/');
+          await fetchRelationship(String(targetUserId), accessLevel, true);
           return;
         }
         throw new Error(message);
       }
 
+      invalidateApiCacheByUrl('/api/connections/pending');
+      invalidateApiCacheByUrl('/api/friends');
+      invalidateApiCacheByUrl('/api/friends/status/');
       setRelationshipStatus('request_sent');
       setSentRequestId('');
       setJustSentRequest(true);
@@ -913,6 +962,9 @@ const ProfilePage = () => {
         throw new Error(data?.error?.message || 'Failed to cancel request');
       }
 
+      invalidateApiCacheByUrl('/api/connections/pending');
+      invalidateApiCacheByUrl('/api/friends');
+      invalidateApiCacheByUrl('/api/friends/status/');
       setRelationshipStatus('none');
       setSentRequestId('');
       setJustSentRequest(false);
@@ -941,13 +993,17 @@ const ProfilePage = () => {
         throw new Error(data?.error?.message || 'Failed to unfriend user');
       }
 
+      invalidateApiCacheByUrl('/api/profiles/');
+      invalidateApiCacheByUrl('/api/friends');
+      invalidateApiCacheByUrl('/api/connections/pending');
+      invalidateApiCacheByUrl('/api/friends/status/');
       setRelationshipStatus('none');
       setAccessLevel('public');
       setMutualCount(0);
       setMutualFriends([]);
       setSentRequestId('');
       setJustSentRequest(false);
-      await fetchProfile(String(targetUserId));
+      await fetchProfile(String(targetUserId), true);
     } catch (error: any) {
       setRelationshipError(error?.message || 'Failed to unfriend user.');
     } finally {
@@ -973,6 +1029,9 @@ const ProfilePage = () => {
         throw new Error(data?.error?.message || 'Failed to block user');
       }
 
+      invalidateApiCacheByUrl('/api/friends');
+      invalidateApiCacheByUrl('/api/connections/pending');
+      invalidateApiCacheByUrl('/api/friends/status/');
       setRelationshipStatus('blocked');
       setBlockedBySelf(true);
     } catch (error: any) {
@@ -1000,9 +1059,12 @@ const ProfilePage = () => {
         throw new Error(data?.error?.message || 'Failed to unblock user');
       }
 
+      invalidateApiCacheByUrl('/api/friends');
+      invalidateApiCacheByUrl('/api/connections/pending');
+      invalidateApiCacheByUrl('/api/friends/status/');
       setBlockedBySelf(false);
       setRelationshipStatus('connected');
-      await fetchRelationship(String(targetUserId), accessLevel);
+      await fetchRelationship(String(targetUserId), accessLevel, true);
     } catch (error: any) {
       setRelationshipError(error?.message || 'Failed to unblock user.');
     } finally {
@@ -1036,7 +1098,8 @@ const ProfilePage = () => {
         throw new Error(data?.error?.message || 'Failed to like profile');
       }
 
-      await fetchMatchStatus(targetUserId);
+      invalidateApiCacheByUrl('/api/match/status/');
+      await fetchMatchStatus(targetUserId, true);
     } catch (error: any) {
       setMatchError(error?.message || 'Failed to like profile');
     } finally {
@@ -1064,7 +1127,8 @@ const ProfilePage = () => {
         throw new Error(data?.error?.message || 'Failed to unlike profile');
       }
 
-      await fetchMatchStatus(targetUserId);
+      invalidateApiCacheByUrl('/api/match/status/');
+      await fetchMatchStatus(targetUserId, true);
     } catch (error: any) {
       setMatchError(error?.message || 'Failed to unlike profile');
     } finally {

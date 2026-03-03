@@ -1,6 +1,18 @@
 import { Request, Response } from 'express';
 import Gig from '../models/Gig';
 import { validateGig } from '../utils/validation';
+import { CacheService } from '../services/cacheService';
+
+const normalizeQueryObject = (query: Request['query']) => {
+  const normalized: Record<string, any> = {};
+  Object.keys(query)
+    .sort()
+    .forEach((key) => {
+      const value = query[key];
+      normalized[key] = Array.isArray(value) ? [...value].sort() : value;
+    });
+  return normalized;
+};
 
 export const createGig = async (req: Request, res: Response) => {
   try {
@@ -35,6 +47,8 @@ export const createGig = async (req: Request, res: Response) => {
     });
 
     await gig.save();
+    await CacheService.invalidateGigLists();
+    await CacheService.deletePattern('search:gigs:*');
 
     res.status(201).json({
       message: 'Gig created successfully',
@@ -63,6 +77,15 @@ export const createGig = async (req: Request, res: Response) => {
 
 export const getGigs = async (req: Request, res: Response) => {
   try {
+    const cacheHash = CacheService.generateQueryHash({
+      type: 'gig-list',
+      query: normalizeQueryObject(req.query)
+    });
+    const cached = await CacheService.getGigList(cacheHash);
+    if (cached) {
+      return res.json(cached);
+    }
+
     const { type, paymentStatus, status, skills, page = 1, limit = 20 } = req.query;
     
     // Build filter
@@ -103,7 +126,7 @@ export const getGigs = async (req: Request, res: Response) => {
       Gig.countDocuments(filter)
     ]);
 
-    res.json({
+    const payload = {
       gigs,
       pagination: {
         page: pageNum,
@@ -111,7 +134,10 @@ export const getGigs = async (req: Request, res: Response) => {
         total,
         pages: Math.ceil(total / limitNum)
       }
-    });
+    };
+
+    await CacheService.setGigList(cacheHash, payload);
+    res.json(payload);
   } catch (error: any) {
     console.error('Get gigs error:', error);
     res.status(500).json({
@@ -127,6 +153,11 @@ export const getGigs = async (req: Request, res: Response) => {
 export const getGigById = async (req: Request, res: Response) => {
   try {
     const { gigId } = req.params;
+    const gigCacheKey = `gig:${gigId}`;
+    const cachedGig = await CacheService.get(gigCacheKey);
+    if (cachedGig) {
+      return res.json(cachedGig);
+    }
 
     const gig = await Gig.findById(gigId)
       .populate('creatorId', 'name profession bio photo')
@@ -143,7 +174,9 @@ export const getGigById = async (req: Request, res: Response) => {
       });
     }
 
-    res.json({ gig });
+    const payload = { gig };
+    await CacheService.set(gigCacheKey, payload, 120);
+    res.json(payload);
   } catch (error: any) {
     console.error('Get gig error:', error);
     res.status(500).json({
@@ -198,6 +231,9 @@ export const updateGig = async (req: Request, res: Response) => {
     });
 
     await gig.save();
+    await CacheService.invalidateGigLists();
+    await CacheService.delete(`gig:${gigId}`);
+    await CacheService.deletePattern('search:gigs:*');
 
     res.json({
       message: 'Gig updated successfully',
@@ -249,6 +285,9 @@ export const deleteGig = async (req: Request, res: Response) => {
     }
 
     await Gig.findByIdAndDelete(gigId);
+    await CacheService.invalidateGigLists();
+    await CacheService.delete(`gig:${gigId}`);
+    await CacheService.deletePattern('search:gigs:*');
 
     res.json({
       message: 'Gig deleted successfully'
@@ -357,6 +396,9 @@ export const applyToGig = async (req: Request, res: Response) => {
     // Add applicant to gig
     gig.applicants.push(userId as any);
     await gig.save();
+    await CacheService.invalidateGigLists();
+    await CacheService.delete(`gig:${gigId}`);
+    await CacheService.deletePattern('search:gigs:*');
 
     res.status(201).json({
       message: 'Application submitted successfully',
@@ -506,6 +548,10 @@ export const respondToApplication = async (req: Request, res: Response) => {
 
       await chatRoom.save();
     }
+
+    await CacheService.invalidateGigLists();
+    await CacheService.delete(`gig:${gigId}`);
+    await CacheService.deletePattern('search:gigs:*');
 
     res.json({
       message: `Application ${action}ed successfully`,

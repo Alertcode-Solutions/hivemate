@@ -241,6 +241,12 @@
   min-height: 35px;
 }
 
+.search-page .filter-text-input {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 38px;
+}
+
 .search-page .filter-section input[type='text']:focus,
 .search-page .filter-section select:focus {
   outline: none;

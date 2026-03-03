@@ -1,7 +1,8 @@
-import { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useState, useEffect, useRef } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { getApiBaseUrl } from '../utils/runtimeConfig';
 import { goToProfile, resolveProfileTarget } from '../utils/profileRouting';
+import { fetchJsonCached, invalidateApiCacheByUrl } from '../utils/apiCache';
 import LoadingDots from './LoadingDots';
 import './ProfilePreviewModal.css';
 
@@ -28,6 +29,7 @@ const ProfilePreviewModal = ({
   onClose
 }: ProfilePreviewModalProps) => {
   const navigate = useNavigate();
+  const location = useLocation();
   const [profile, setProfile] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -36,6 +38,7 @@ const ProfilePreviewModal = ({
   const [matchStatus, setMatchStatus] = useState<MatchStatus | null>(null);
   const [matchLoading, setMatchLoading] = useState(false);
   const [matchError, setMatchError] = useState('');
+  const requestIdRef = useRef(0);
 
   const API_URL = getApiBaseUrl();
   const normalizeId = (value: any): string => {
@@ -71,69 +74,63 @@ const ProfilePreviewModal = ({
     fetchProfileAndRelationship();
   }, [userId]);
 
-  const fetchProfileAndRelationship = async () => {
+  const fetchProfileAndRelationship = async (forceRefresh = false) => {
+    const requestId = ++requestIdRef.current;
     try {
       const token = localStorage.getItem('token');
       if (!token) {
         setError('Please login again');
+        setLoading(false);
         return;
       }
 
-      const [profileResult, pendingResult, friendsResult, matchResult] = await Promise.allSettled([
-        fetch(`${API_URL}/api/profiles/${userId}`, {
-          headers: { Authorization: `Bearer ${token}` }
-        }),
-        fetch(`${API_URL}/api/connections/pending`, {
-          headers: { Authorization: `Bearer ${token}` }
-        }),
-        fetch(`${API_URL}/api/friends`, {
-          headers: { Authorization: `Bearer ${token}` }
-        }),
-        fetch(`${API_URL}/api/match/status/${userId}`, {
-          headers: { Authorization: `Bearer ${token}` }
-        })
-      ]);
+      setLoading(true);
+      setError('');
 
-      if (profileResult.status !== 'fulfilled') {
-        setError('Failed to load profile');
-        return;
-      }
+      // Phase 1: Load profile first so modal content paints immediately.
+      const profileData = await fetchJsonCached<any>(
+        `${API_URL}/api/profiles/${userId}`,
+        { headers: { Authorization: `Bearer ${token}` } },
+        { ttlMs: 30000, forceRefresh }
+      );
 
-      const profileResponse = profileResult.value;
-      if (!profileResponse.ok) {
-        const errorData = await profileResponse.json().catch(() => ({}));
-        setError(errorData.error?.message || 'Failed to load profile');
-        return;
-      }
-
-      const profileData = await profileResponse.json();
+      if (requestId !== requestIdRef.current) return;
       setProfile(profileData.profile);
       setAccessLevel(profileData.accessLevel || '');
-      if (matchResult.status === 'fulfilled' && matchResult.value.ok) {
-        const matchData = await matchResult.value.json();
-        setMatchStatus(matchData);
+      setLoading(false);
+
+      if (profileData.accessLevel === 'connected' || profileData.accessLevel === 'own') {
+        setRelationshipStatus('connected');
+      } else {
+        setRelationshipStatus('none');
+      }
+
+      // Phase 2: Load secondary relationship/match state without blocking UI.
+      const [pendingResult, matchResult] = await Promise.allSettled([
+        profileData.accessLevel === 'connected' || profileData.accessLevel === 'own'
+          ? Promise.resolve(null)
+          : fetchJsonCached<any>(
+              `${API_URL}/api/connections/pending`,
+              { headers: { Authorization: `Bearer ${token}` } },
+              { ttlMs: 15000, forceRefresh }
+            ),
+        fetchJsonCached<any>(
+          `${API_URL}/api/match/status/${userId}`,
+          { headers: { Authorization: `Bearer ${token}` } },
+          { ttlMs: 10000, forceRefresh }
+        )
+      ]);
+
+      if (requestId !== requestIdRef.current) return;
+
+      if (matchResult.status === 'fulfilled') {
+        setMatchStatus(matchResult.value);
       } else {
         setMatchStatus(null);
       }
 
-      if (profileData.accessLevel === 'connected' || profileData.accessLevel === 'own') {
-        setRelationshipStatus('connected');
-        return;
-      }
-
-      if (friendsResult.status === 'fulfilled' && friendsResult.value.ok) {
-        const friendsData = await friendsResult.value.json();
-        const isFriend = (friendsData.friends || []).some(
-          (friend: any) => normalizeId(friend.friendId) === normalizeId(userId)
-        );
-        if (isFriend) {
-          setRelationshipStatus('connected');
-          return;
-        }
-      }
-
-      if (pendingResult.status === 'fulfilled' && pendingResult.value.ok) {
-        const pendingData = await pendingResult.value.json();
+      if (pendingResult.status === 'fulfilled' && pendingResult.value) {
+        const pendingData = pendingResult.value;
         const hasSentRequest = (pendingData.sent || []).some(
           (req: any) => normalizeId(req.receiverId) === normalizeId(userId)
         );
@@ -150,9 +147,13 @@ const ProfilePreviewModal = ({
         }
       }
     } catch (err) {
+      if (requestId !== requestIdRef.current) return;
       setError('Failed to load profile');
-    } finally {
       setLoading(false);
+    } finally {
+      if (requestId === requestIdRef.current) {
+        setLoading(false);
+      }
     }
   };
 
@@ -169,6 +170,8 @@ const ProfilePreviewModal = ({
       });
 
       if (response.ok) {
+        invalidateApiCacheByUrl('/api/connections/pending');
+        invalidateApiCacheByUrl('/api/friends');
         setRelationshipStatus('request_sent');
       } else {
         const data = await response.json();
@@ -212,7 +215,9 @@ const ProfilePreviewModal = ({
         throw new Error(data?.error?.message || 'Failed to like profile');
       }
 
-      await fetchProfileAndRelationship();
+      invalidateApiCacheByUrl('/api/match/status/');
+      invalidateApiCacheByUrl('/api/profiles/');
+      await fetchProfileAndRelationship(true);
     } catch (err: any) {
       setMatchError(err?.message || 'Failed to like profile');
     } finally {
@@ -235,7 +240,9 @@ const ProfilePreviewModal = ({
         throw new Error(data?.error?.message || 'Failed to unlike profile');
       }
 
-      await fetchProfileAndRelationship();
+      invalidateApiCacheByUrl('/api/match/status/');
+      invalidateApiCacheByUrl('/api/profiles/');
+      await fetchProfileAndRelationship(true);
     } catch (err: any) {
       setMatchError(err?.message || 'Failed to unlike profile');
     } finally {
@@ -247,7 +254,9 @@ const ProfilePreviewModal = ({
     onClose();
     const normalizedUserId = normalizeId(profile?.userId || userId);
     if (!normalizedUserId) return;
-    navigate(`/chat?user=${encodeURIComponent(normalizedUserId)}`);
+    navigate(`/chat?user=${encodeURIComponent(normalizedUserId)}`, {
+      state: { from: `${location.pathname}${location.search}` }
+    });
   };
 
   const openProfile = () => {
@@ -266,6 +275,8 @@ const ProfilePreviewModal = ({
   const isConnected = relationshipStatus === 'connected';
   const isMatched = Boolean(matchStatus?.isMatched);
   const canLike = isConnected && Boolean(matchStatus?.canLike);
+  const proposeIsRevert = isMatched || Boolean(matchStatus?.likedByMe);
+  const proposeLabel = proposeIsRevert ? (isMatched ? 'Breakup' : 'Withdraw Proposal') : 'Propose';
 
   return (
     <div className="modal-overlay" onClick={onClose}>
@@ -336,11 +347,11 @@ const ProfilePreviewModal = ({
                   {canLike && (
                     <button
                       className="open-chat-button"
-                      onClick={(isMatched || Boolean(matchStatus?.likedByMe)) ? unlikeProfile : likeProfile}
+                      onClick={proposeIsRevert ? unlikeProfile : likeProfile}
                       type="button"
                       disabled={matchLoading}
                     >
-                      {matchLoading ? 'Updating...' : (isMatched ? 'Unlike' : (matchStatus?.likedByMe ? 'Withdraw Like' : 'Like'))}
+                      {matchLoading ? 'Updating...' : proposeLabel}
                     </button>
                   )}
                 </>

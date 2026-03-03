@@ -5,6 +5,7 @@ import { acquireSharedSocket, releaseSharedSocket } from '../utils/socketManager
 import AppContainer from '../components/ui/AppContainer';
 import PageHeader from '../components/ui/PageHeader';
 import { goToProfile } from '../utils/profileRouting';
+import { fetchJsonCached, invalidateApiCacheByUrl } from '../utils/apiCache';
 import BeeLoader from '../components/BeeLoader';
 import useSmoothLoader from '../hooks/useSmoothLoader';
 import './ConnectionsPage.css';
@@ -78,19 +79,35 @@ const ConnectionsPage = () => {
     };
   }, []);
 
-  const fetchRequests = async () => {
+  const fetchRequests = async (forceRefresh = false) => {
     try {
       const token = localStorage.getItem('token');
-      const response = await fetch(`${API_URL}/api/connections/pending`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        setReceived(data.received || []);
-        setSent(data.sent || []);
+      if (!token) {
+        setReceived([]);
+        setSent([]);
+        return;
       }
-    } catch (error) {
+      const data = await fetchJsonCached<any>(
+        `${API_URL}/api/connections/pending`,
+        {
+          headers: { Authorization: `Bearer ${token}` }
+        },
+        {
+          ttlMs: 15000,
+          forceRefresh
+        }
+      );
+      setReceived(data.received || []);
+      setSent(data.sent || []);
+    } catch (error: any) {
+      if (error?.status === 401) {
+        localStorage.removeItem('token');
+        localStorage.removeItem('userId');
+        localStorage.removeItem('privateKey');
+        localStorage.removeItem('publicKey');
+        navigate('/login');
+        return;
+      }
       console.error('Failed to fetch requests:', error);
     } finally {
       setLoading(false);
@@ -106,7 +123,11 @@ const ConnectionsPage = () => {
       });
 
       if (response.ok) {
-        fetchRequests();
+        // Optimistic local update for instant UI response.
+        setReceived((prev) => prev.filter((request) => request.id !== requestId));
+        invalidateApiCacheByUrl('/api/connections/pending');
+        invalidateApiCacheByUrl('/api/friends');
+        fetchRequests(true);
       }
     } catch (error) {
       console.error('Failed to accept request:', error);
@@ -122,7 +143,10 @@ const ConnectionsPage = () => {
       });
 
       if (response.ok) {
-        fetchRequests();
+        // Optimistic local update for instant UI response.
+        setReceived((prev) => prev.filter((request) => request.id !== requestId));
+        invalidateApiCacheByUrl('/api/connections/pending');
+        fetchRequests(true);
       }
     } catch (error) {
       console.error('Failed to decline request:', error);

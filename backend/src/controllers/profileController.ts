@@ -134,6 +134,7 @@ export const createProfile = async (req: Request, res: Response) => {
     profile.optimizedKeywords = [...optimization.keywords, ...optimization.semanticTags];
     await profile.save();
     console.log('Profile optimization complete');
+    await CacheService.deletePattern('search:profiles:*');
 
     res.status(201).json({
       message: 'Profile created successfully',
@@ -474,6 +475,7 @@ export const updateProfile = async (req: Request, res: Response) => {
 
     // Invalidate cache
     await CacheService.invalidateProfile(userId);
+    await CacheService.deletePattern('search:profiles:*');
 
     res.json({
       message: 'Profile updated successfully',
@@ -618,6 +620,7 @@ export const deleteProfile = async (req: Request, res: Response) => {
 
     // Invalidate cache
     await CacheService.invalidateProfile(userId);
+    await CacheService.deletePattern('search:profiles:*');
 
     res.json({
       message: 'Profile deleted successfully'

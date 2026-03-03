@@ -1,9 +1,10 @@
 import { useState, useEffect } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { getApiBaseUrl } from '../utils/runtimeConfig';
 import AppContainer from '../components/ui/AppContainer';
 import PageHeader from '../components/ui/PageHeader';
 import { goToProfile } from '../utils/profileRouting';
+import { fetchJsonCached, invalidateApiCacheByUrl } from '../utils/apiCache';
 import BeeLoader from '../components/BeeLoader';
 import useSmoothLoader from '../hooks/useSmoothLoader';
 import './FriendsPage.css';
@@ -27,6 +28,7 @@ const BackArrowIcon = () => (
 
 const FriendsPage = () => {
   const navigate = useNavigate();
+  const location = useLocation();
   const { userId } = useParams();
   const [friends, setFriends] = useState<Friend[]>([]);
   const [loading, setLoading] = useState(true);
@@ -49,7 +51,7 @@ const FriendsPage = () => {
     fetchFriends();
   }, [userId]);
 
-  const fetchFriends = async () => {
+  const fetchFriends = async (forceRefresh = false) => {
     try {
       const token = localStorage.getItem('token');
       if (!token) {
@@ -57,22 +59,27 @@ const FriendsPage = () => {
         return;
       }
       const endpoint = isOwnList ? `${API_URL}/api/friends` : `${API_URL}/api/friends/user/${userId}`;
-      const response = await fetch(endpoint, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        setFriends(data.friends || []);
-        if (!isOwnList && data.owner?.name) {
-          setOwnerName(data.owner.name);
-        } else {
-          setOwnerName('');
+      const data = await fetchJsonCached<any>(
+        endpoint,
+        {
+          headers: { Authorization: `Bearer ${token}` }
+        },
+        {
+          ttlMs: 30000,
+          forceRefresh
         }
-      } else if (response.status === 401) {
-        handleUnauthorized();
+      );
+      setFriends(data.friends || []);
+      if (!isOwnList && data.owner?.name) {
+        setOwnerName(data.owner.name);
+      } else {
+        setOwnerName('');
       }
-    } catch (error) {
+    } catch (error: any) {
+      if (error?.status === 401) {
+        handleUnauthorized();
+        return;
+      }
       console.error('Failed to fetch friends:', error);
     } finally {
       setLoading(false);
@@ -90,7 +97,10 @@ const FriendsPage = () => {
       });
 
       if (response.ok) {
-        fetchFriends();
+        setFriends((prev) => prev.filter((friend) => friend.friendshipId !== friendshipId));
+        invalidateApiCacheByUrl('/api/friends');
+        invalidateApiCacheByUrl('/api/connections/pending');
+        fetchFriends(true);
       }
     } catch (error) {
       console.error('Failed to remove friend:', error);
@@ -108,7 +118,10 @@ const FriendsPage = () => {
       });
 
       if (response.ok) {
-        fetchFriends();
+        setFriends((prev) => prev.filter((friend) => friend.friendshipId !== friendshipId));
+        invalidateApiCacheByUrl('/api/friends');
+        invalidateApiCacheByUrl('/api/connections/pending');
+        fetchFriends(true);
       }
     } catch (error) {
       console.error('Failed to block friend:', error);
@@ -184,7 +197,14 @@ const FriendsPage = () => {
                   </div>
                   {isOwnList && (
                     <div className="friend-actions">
-                      <button className="message-btn ui-btn ui-btn-primary" onClick={() => navigate(`/chat/${friend.friendId}`)}>
+                      <button
+                        className="message-btn ui-btn ui-btn-primary"
+                        onClick={() =>
+                          navigate(`/chat/${friend.friendId}`, {
+                            state: { from: `${location.pathname}${location.search}` }
+                          })
+                        }
+                      >
                         Message
                       </button>
                       <button className="remove-btn ui-btn ui-btn-secondary" onClick={() => handleRemoveFriend(friend.friendshipId)}>

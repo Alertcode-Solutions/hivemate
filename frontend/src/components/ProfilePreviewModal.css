@@ -9,33 +9,33 @@
   align-items: center;
   justify-content: center;
   z-index: 10020;
-  padding: 1rem;
+  padding: 0.9rem;
 }
 
 .modal-content {
   background: var(--bg-elevated);
-  border-radius: var(--radius-lg);
-  max-width: 430px;
+  border-radius: 26px;
+  max-width: 420px;
   width: 100%;
-  max-height: 90vh;
+  max-height: min(90vh, 760px);
   overflow-y: auto;
   position: relative;
   z-index: 10021;
   border: 1px solid var(--border-subtle);
-  box-shadow: 0 24px 60px rgba(2, 6, 23, 0.35);
+  box-shadow: 0 28px 70px rgba(2, 6, 23, 0.38);
 }
 
 .modal-close {
   position: absolute;
-  top: 1rem;
-  right: 1rem;
+  top: 0.75rem;
+  right: 0.75rem;
   background: none;
   border: none;
   font-size: 2rem;
   color: var(--text-muted);
   cursor: pointer;
-  width: 40px;
-  height: 40px;
+  width: 36px;
+  height: 36px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -60,32 +60,32 @@
 }
 
 .profile-preview {
-  padding: var(--space-5);
-  
+  padding: 1.25rem 1.05rem 1.15rem;
   z-index: 5;
 }
 
 .profile-header {
   text-align: center;
-  margin-bottom: var(--space-4);
-  padding-bottom: var(--space-4);
+  margin-bottom: 0.9rem;
+  padding-bottom: 0.95rem;
   border-bottom: 1px solid var(--border-subtle);
 }
 
 .profile-avatar-wrap {
-  margin-bottom: var(--space-3);
-      display: flex;
-    align-items: self-end;
+  width: fit-content;
+  margin: 0 auto 0.62rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .profile-avatar,
 .profile-avatar-fallback {
-  width: 92px;
-  height: 92px;
+  width: 88px;
+  height: 88px;
   border-radius: 999px;
-  margin: 0 auto;
   border: 3px solid #fff;
-  
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.22);
 }
 
 .profile-avatar {
@@ -103,20 +103,21 @@
 }
 
 .profile-header h2 {
-  font-size: 1.55rem;
+  font-size: 1.95rem;
   color: var(--text-primary);
-  margin: 0 0 0.5rem 0;
+  margin: 0 0 0.24rem;
+  line-height: 1.15;
 }
 
 .profession {
-  font-size: 1rem;
+  font-size: 1.02rem;
   color: var(--color-primary);
-  font-weight: 600;
+  font-weight: 500;
   margin: 0;
 }
 
 .profile-quick-meta {
-  margin-top: 0.5rem;
+  margin-top: 0.58rem;
   display: flex;
   justify-content: center;
   align-items: center;
@@ -128,22 +129,22 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 0.22rem 0.58rem;
+  padding: 0.27rem 0.64rem;
   border-radius: 999px;
   background: #eef4ff;
   border: 1px solid #d5e2fb;
   color: #27406e;
-  font-size: 0.76rem;
+  font-size: 0.83rem;
   font-weight: 600;
 }
 
 .connection-pill,
 .preview-pill {
   display: inline-block;
-  margin-top: var(--space-2);
-  padding: 0.3rem 0.7rem;
+  margin-top: 0.52rem;
+  padding: 0.32rem 0.78rem;
   border-radius: 999px;
-  font-size: 0.8rem;
+  font-size: 0.84rem;
   font-weight: 600;
 }
 
@@ -158,14 +159,14 @@
 }
 
 .profile-bio {
-  margin-bottom: 0.85rem;
+  margin-bottom: 0.82rem;
 }
 
 .profile-bio h3,
 .profile-skills h3 {
-  font-size: 1.1rem;
+  font-size: 1.03rem;
   color: #333;
-  margin-bottom: 0.75rem;
+  margin-bottom: 0.52rem;
 }
 
 .profile-bio p {
@@ -179,7 +180,7 @@
 }
 
 .profile-skills {
-  margin-bottom: 1rem;
+  margin-bottom: 0.88rem;
 }
 
 .skills-list {
@@ -191,20 +192,18 @@
 .skill-tag {
   background: #e6f2ff;
   color: var(--color-primary);
-  padding: 0.5rem 1rem;
+  padding: 0.42rem 0.84rem;
   border-radius: 20px;
-  font-size: 0.9rem;
+  font-size: 0.86rem;
   font-weight: 500;
 }
 
 .profile-actions {
-  display: flex;
-  flex-direction: column;
-  gap: 1rem;
+  display: grid;
+  gap: 0.72rem;
 }
 
 .profile-actions.dual-actions {
-  display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
@@ -214,13 +213,14 @@
 .pending-review-button,
 .request-sent-button,
 .chat-button {
-  padding: 0.8rem 0.72rem;
+  padding: 0.84rem 0.72rem;
   border: 1px solid transparent;
-  border-radius: var(--radius-md);
+  border-radius: 14px;
   font-size: 0.92rem;
   font-weight: 600;
   cursor: pointer;
   transition: all var(--transition-fast);
+  min-height: 50px;
 }
 
 .send-request-button {
@@ -287,20 +287,25 @@
 
 @media (max-width: 768px) {
   .modal-content {
-    max-height: 95vh;
+    max-height: 92vh;
     z-index: 6;
+    border-radius: 24px;
   }
 
   .profile-preview {
-    padding: var(--space-5);
+    padding: 1.2rem 0.95rem 1.05rem;
     z-index: 5;
   }
 
   .profile-header h2 {
-    font-size: 1.38rem;
+    font-size: 1.95rem;
   }
 
   .profile-actions.dual-actions {
     grid-template-columns: 1fr;
+  }
+
+  .profile-actions {
+    gap: 0.64rem;
   }
 }

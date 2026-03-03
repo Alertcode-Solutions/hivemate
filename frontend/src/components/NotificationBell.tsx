@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { Socket } from 'socket.io-client';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { getApiBaseUrl } from '../utils/runtimeConfig';
 import { acquireSharedSocket, releaseSharedSocket } from '../utils/socketManager';
 import './NotificationBell.css';
@@ -73,6 +73,7 @@ const normalizeId = (value: any): string => {
 
 const NotificationBell = () => {
   const navigate = useNavigate();
+  const location = useLocation();
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [unreadCount, setUnreadCount] = useState(0);
   const [isOpen, setIsOpen] = useState(false);
@@ -324,11 +325,17 @@ const NotificationBell = () => {
       );
 
       if (chatRoomId) {
-        navigate(`/chat?room=${encodeURIComponent(chatRoomId)}`);
+        navigate(`/chat?room=${encodeURIComponent(chatRoomId)}`, {
+          state: { from: `${location.pathname}${location.search}` }
+        });
       } else if (targetUserId) {
-        navigate(`/chat/${targetUserId}`);
+        navigate(`/chat/${targetUserId}`, {
+          state: { from: `${location.pathname}${location.search}` }
+        });
       } else {
-        navigate('/chat');
+        navigate('/chat', {
+          state: { from: `${location.pathname}${location.search}` }
+        });
       }
       return;
     }
@@ -346,9 +353,13 @@ const NotificationBell = () => {
           from: callerId,
           name: callerName
         });
-        navigate(`/chat?${params.toString()}`);
+        navigate(`/chat?${params.toString()}`, {
+          state: { from: `${location.pathname}${location.search}` }
+        });
       } else {
-        navigate('/chat');
+        navigate('/chat', {
+          state: { from: `${location.pathname}${location.search}` }
+        });
       }
       return;
     }

@@ -244,6 +244,13 @@ const ChatPage = () => {
   const currentUserId = localStorage.getItem('userId');
   const roomFromQuery = new URLSearchParams(location.search).get('room');
   const userFromQuery = new URLSearchParams(location.search).get('user');
+  const navigationState = (location.state as { from?: string } | null) || null;
+  const returnPath =
+    typeof navigationState?.from === 'string' &&
+    navigationState.from.length > 0 &&
+    !navigationState.from.startsWith('/chat')
+      ? navigationState.from
+      : '';
   const currentUserIdStr = String(currentUserId || '');
   const pinnedStorageKey = `chat:pinned:${currentUserIdStr}`;
   const mutedStorageKey = `chat:muted:${currentUserIdStr}`;
@@ -477,6 +484,20 @@ const ChatPage = () => {
   const openUserProfile = (userId: string) => {
     if (!userId) return;
     goToProfile(navigate, userId);
+  };
+
+  const leaveChatPage = () => {
+    if (returnPath) {
+      navigate(returnPath);
+      return;
+    }
+
+    if (window.history.length > 1) {
+      navigate(-1);
+      return;
+    }
+
+    navigate('/home');
   };
 
   const resolveChatTargetUserId = async (rawTargetId: string) => {
@@ -2497,7 +2518,7 @@ const ChatPage = () => {
         {/* Chat List Sidebar */}
         <div className={`chat-list-sidebar ${isMobileView && showSidebarOnMobile ? 'mobile-visible' : ''}`}>
           <div className="chat-list-header">
-            <button className="back-button" onClick={() => navigate('/home')}>
+            <button className="back-button" onClick={leaveChatPage}>
               <BackArrowIcon />
             </button>
             <h2>Messages</h2>
@@ -2614,6 +2635,8 @@ const ChatPage = () => {
                       onClick={() => {
                         if (window.history.state?.chatPanel) {
                           window.history.back();
+                        } else if (returnPath) {
+                          leaveChatPage();
                         } else {
                           setShowSidebarOnMobile(true);
                         }

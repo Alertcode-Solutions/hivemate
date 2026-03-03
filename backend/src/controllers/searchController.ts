@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import Profile from '../models/Profile';
 import Gig from '../models/Gig';
 import User from '../models/User';
+import { CacheService } from '../services/cacheService';
 
 const escapeRegex = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -21,6 +22,17 @@ export const searchProfiles = async (req: Request, res: Response) => {
       limit = 20
     } = req.body;
 
+    // Read-through cache for expensive profile search combinations.
+    const profileCacheHash = CacheService.generateQueryHash({
+      type: 'profiles',
+      payload: req.body
+    });
+    const profileCacheKey = `profiles:${profileCacheHash}`;
+    const cachedProfiles = await CacheService.getSearchResults(profileCacheKey);
+    if (cachedProfiles) {
+      return res.json(cachedProfiles);
+    }
+
     // Build filter
     const baseFilter: any = {};
 
@@ -39,7 +51,7 @@ export const searchProfiles = async (req: Request, res: Response) => {
 
       if (normalizedLocations.length > 0) {
         baseFilter.place = {
-          $in: normalizedLocations.map((location: string) => new RegExp(`^${escapeRegex(location)}$`, 'i'))
+          $in: normalizedLocations.map((location: string) => new RegExp(escapeRegex(location), 'i'))
         };
       }
     }
@@ -163,7 +175,7 @@ export const searchProfiles = async (req: Request, res: Response) => {
       });
     }
 
-    res.json({
+    const payload = {
       profiles,
       pagination: {
         page: pageNum,
@@ -171,7 +183,10 @@ export const searchProfiles = async (req: Request, res: Response) => {
         total,
         pages: Math.ceil(total / limitNum)
       }
-    });
+    };
+
+    await CacheService.setSearchResults(profileCacheKey, payload);
+    res.json(payload);
   } catch (error: any) {
     console.error('Search profiles error:', error);
     res.status(500).json({
@@ -193,6 +208,17 @@ export const searchGigs = async (req: Request, res: Response) => {
       page = 1,
       limit = 20
     } = req.body;
+
+    // Read-through cache for filtered gig searches.
+    const gigSearchCacheHash = CacheService.generateQueryHash({
+      type: 'gig-search',
+      payload: req.body
+    });
+    const gigSearchCacheKey = `gigs:${gigSearchCacheHash}`;
+    const cachedGigSearch = await CacheService.getSearchResults(gigSearchCacheKey);
+    if (cachedGigSearch) {
+      return res.json(cachedGigSearch);
+    }
 
     // Build filter
     const filter: any = { status: 'open' };
@@ -224,7 +250,7 @@ export const searchGigs = async (req: Request, res: Response) => {
       Gig.countDocuments(filter)
     ]);
 
-    res.json({
+    const payload = {
       gigs,
       pagination: {
         page: pageNum,
@@ -232,7 +258,10 @@ export const searchGigs = async (req: Request, res: Response) => {
         total,
         pages: Math.ceil(total / limitNum)
       }
-    });
+    };
+
+    await CacheService.setSearchResults(gigSearchCacheKey, payload);
+    res.json(payload);
   } catch (error: any) {
     console.error('Search gigs error:', error);
     res.status(500).json({

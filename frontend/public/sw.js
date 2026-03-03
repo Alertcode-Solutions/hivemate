@@ -1,14 +1,25 @@
 // Service Worker for HiveMate
-const CACHE_VERSION = 'v2';
+const CACHE_VERSION = 'v4';
 const STATIC_CACHE = `hivemate-static-${CACHE_VERSION}`;
 const DYNAMIC_CACHE = `hivemate-dynamic-${CACHE_VERSION}`;
+const DYNAMIC_CACHE_MAX_ENTRIES = 120;
 
 // Assets to cache on install
 const STATIC_ASSETS = [
   '/',
+  '/index.html',
   '/manifest.json',
   '/icons.svg'
 ];
+
+async function trimDynamicCache(maxEntries) {
+  const cache = await caches.open(DYNAMIC_CACHE);
+  const requests = await cache.keys();
+  if (requests.length <= maxEntries) return;
+
+  const deleteCount = requests.length - maxEntries;
+  await Promise.all(requests.slice(0, deleteCount).map((request) => cache.delete(request)));
+}
 
 // Install event - cache static assets
 self.addEventListener('install', (event) => {
@@ -58,8 +69,14 @@ self.addEventListener('fetch', (event) => {
 
   if (isNavigation || isIndexRequest) {
     event.respondWith(
-      fetch(request, { cache: 'no-store' })
-        .then((networkResponse) => networkResponse)
+      fetch(request)
+        .then(async (networkResponse) => {
+          if (networkResponse && networkResponse.status === 200) {
+            const cache = await caches.open(STATIC_CACHE);
+            cache.put('/index.html', networkResponse.clone());
+          }
+          return networkResponse;
+        })
         .catch(async () => {
           const cache = await caches.open(STATIC_CACHE);
           return (await cache.match('/')) || (await cache.match('/index.html'));
@@ -75,7 +92,8 @@ self.addEventListener('fetch', (event) => {
         const networkResponse = await fetch(request);
         if (networkResponse && networkResponse.status === 200) {
           const cache = await caches.open(DYNAMIC_CACHE);
-          cache.put(request, networkResponse.clone());
+          await cache.put(request, networkResponse.clone());
+          await trimDynamicCache(DYNAMIC_CACHE_MAX_ENTRIES);
         }
         return networkResponse;
       })
@@ -88,7 +106,8 @@ self.addEventListener('fetch', (event) => {
       .then(async (networkResponse) => {
         if (networkResponse && networkResponse.status === 200) {
           const cache = await caches.open(DYNAMIC_CACHE);
-          cache.put(request, networkResponse.clone());
+          await cache.put(request, networkResponse.clone());
+          await trimDynamicCache(DYNAMIC_CACHE_MAX_ENTRIES);
         }
         return networkResponse;
       })
