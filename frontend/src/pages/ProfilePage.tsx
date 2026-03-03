@@ -30,6 +30,96 @@ const BackIcon = () => (
   </svg>
 );
 
+const MoreIcon = () => (
+  <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <circle cx="6" cy="12" r="1.8" fill="currentColor" />
+    <circle cx="12" cy="12" r="1.8" fill="currentColor" />
+    <circle cx="18" cy="12" r="1.8" fill="currentColor" />
+  </svg>
+);
+
+const MessageIcon = () => (
+  <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <path
+      d="M12 4c-4.6 0-8.4 3.1-8.4 7 0 1.8.8 3.4 2.1 4.6l-.8 3.7 3.8-1.4c1 .4 2.1.6 3.3.6 4.6 0 8.4-3.1 8.4-7S16.6 4 12 4z"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.7"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+    <circle cx="9.1" cy="11" r="1.1" fill="currentColor" />
+    <circle cx="12" cy="11" r="1.1" fill="currentColor" />
+    <circle cx="14.9" cy="11" r="1.1" fill="currentColor" />
+  </svg>
+);
+
+const ProposeIcon = () => (
+  <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <path
+      d="m12 20-1.1-1C6.4 15 4 12.9 4 10.2 4 8 5.8 6.2 8 6.2c1.3 0 2.6.6 3.4 1.6.8-1 2.1-1.6 3.4-1.6 2.2 0 4 1.8 4 4 0 2.7-2.4 4.8-6.9 8.8L12 20z"
+      fill="currentColor"
+    />
+    <path d="M6 6 18 18M18 6 6 18" fill="none" stroke="#ffffff" strokeWidth="1.8" strokeLinecap="round" />
+  </svg>
+);
+
+const UnfriendIcon = () => (
+  <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <path
+      d="m12 20-1.1-1C6.4 15 4 12.9 4 10.2 4 8 5.8 6.2 8 6.2c1.3 0 2.6.6 3.4 1.6.8-1 2.1-1.6 3.4-1.6 2.2 0 4 1.8 4 4 0 2.7-2.4 4.8-6.9 8.8L12 20z"
+      fill="currentColor"
+    />
+  </svg>
+);
+
+const BlockIcon = () => (
+  <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <path
+      d="M12 3.8 5.8 6.1v5.7c0 4 2.7 7.7 6.2 8.8 3.5-1.1 6.2-4.8 6.2-8.8V6.1L12 3.8z"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinejoin="round"
+    />
+  </svg>
+);
+
+const EditIcon = () => (
+  <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <path
+      d="M4 20h3.2l9.9-9.9-3.2-3.2L4 16.8V20zm14.7-11.7 1.6-1.6a1.5 1.5 0 0 0 0-2.1l-.9-.9a1.5 1.5 0 0 0-2.1 0l-1.6 1.6 3 3z"
+      fill="currentColor"
+    />
+  </svg>
+);
+
+const LockIcon = () => (
+  <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <path
+      d="M7 10V8a5 5 0 0 1 10 0v2M6.5 10h11a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1v-8a1 1 0 0 1 1-1z"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </svg>
+);
+
+const LogoutIcon = () => (
+  <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <path d="M14 7h3a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2h-3" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    <path d="M10 8 6 12l4 4M6 12h10" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+
+const TrashIcon = () => (
+  <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <path d="M4 7h16M9 7V5h6v2M8 7l1 12h6l1-12" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+
 const ProfilePage = () => {
   const navigate = useNavigate();
   const { userId: paramUserId } = useParams();
@@ -44,6 +134,20 @@ const ProfilePage = () => {
   const [photoUploading, setPhotoUploading] = useState(false);
   const [pendingPhoto, setPendingPhoto] = useState<string | null>(null);
   const [photoError, setPhotoError] = useState('');
+  const [coverUploading, setCoverUploading] = useState(false);
+  const [coverError, setCoverError] = useState('');
+  const [isCoverMenuOpen, setIsCoverMenuOpen] = useState(false);
+  const [isCoverCropOpen, setIsCoverCropOpen] = useState(false);
+  const [coverCropSource, setCoverCropSource] = useState<string | null>(null);
+  const [coverCropZoom, setCoverCropZoom] = useState(1);
+  const [coverCropX, setCoverCropX] = useState(50);
+  const [coverCropY, setCoverCropY] = useState(50);
+  const [coverCropError, setCoverCropError] = useState('');
+  const [coverImageSize, setCoverImageSize] = useState<{ width: number; height: number } | null>(null);
+  const [scrollToEditSection, setScrollToEditSection] = useState(false);
+  const [isSettingsMenuOpen, setIsSettingsMenuOpen] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [deleteLoading, setDeleteLoading] = useState(false);
   const [showChangePassword, setShowChangePassword] = useState(false);
   const [passwordOtpSent, setPasswordOtpSent] = useState(false);
   const [passwordLoading, setPasswordLoading] = useState(false);
@@ -68,6 +172,11 @@ const ProfilePage = () => {
     otp: ''
   });
   const photoInputRef = useRef<HTMLInputElement>(null);
+  const coverInputRef = useRef<HTMLInputElement>(null);
+  const settingsMenuRef = useRef<HTMLDivElement>(null);
+  const coverMenuRef = useRef<HTMLDivElement>(null);
+  const editSectionRef = useRef<HTMLElement>(null);
+  const coverCropPreviewRef = useRef<HTMLCanvasElement>(null);
   const handleUnauthorized = () => {
     localStorage.removeItem('token');
     localStorage.removeItem('userId');
@@ -156,6 +265,31 @@ const ProfilePage = () => {
       photos: photoArray
     };
   };
+  const COVER_ASPECT_RATIO = 16 / 5;
+  const getCoverCropRect = (
+    width: number,
+    height: number,
+    zoom: number,
+    xPercent: number,
+    yPercent: number
+  ) => {
+    const boundedZoom = Math.max(1, Math.min(3, zoom || 1));
+    const baseCropWidth = Math.min(width, height * COVER_ASPECT_RATIO);
+    const baseCropHeight = baseCropWidth / COVER_ASPECT_RATIO;
+    const cropWidth = baseCropWidth / boundedZoom;
+    const cropHeight = baseCropHeight / boundedZoom;
+    const maxX = Math.max(0, width - cropWidth);
+    const maxY = Math.max(0, height - cropHeight);
+    const sourceX = (Math.max(0, Math.min(100, xPercent)) / 100) * maxX;
+    const sourceY = (Math.max(0, Math.min(100, yPercent)) / 100) * maxY;
+
+    return {
+      sourceX,
+      sourceY,
+      cropWidth,
+      cropHeight
+    };
+  };
 
   useEffect(() => {
     const currentUserId = normalizeId(localStorage.getItem('userId'));
@@ -168,6 +302,96 @@ const ProfilePage = () => {
       setLoading(false);
     }
   }, [paramUserId]);
+
+  useEffect(() => {
+    if (!isSettingsMenuOpen) return;
+
+    const closeOnOutside = (event: MouseEvent | TouchEvent) => {
+      if (!settingsMenuRef.current) return;
+      const target = event.target as Node | null;
+      if (target && settingsMenuRef.current.contains(target)) return;
+      setIsSettingsMenuOpen(false);
+    };
+
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsSettingsMenuOpen(false);
+      }
+    };
+
+    document.addEventListener('mousedown', closeOnOutside);
+    document.addEventListener('touchstart', closeOnOutside);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('mousedown', closeOnOutside);
+      document.removeEventListener('touchstart', closeOnOutside);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [isSettingsMenuOpen]);
+
+  useEffect(() => {
+    if (!isCoverMenuOpen) return;
+
+    const closeOnOutside = (event: MouseEvent | TouchEvent) => {
+      if (!coverMenuRef.current) return;
+      const target = event.target as Node | null;
+      if (target && coverMenuRef.current.contains(target)) return;
+      setIsCoverMenuOpen(false);
+    };
+
+    document.addEventListener('mousedown', closeOnOutside);
+    document.addEventListener('touchstart', closeOnOutside);
+    return () => {
+      document.removeEventListener('mousedown', closeOnOutside);
+      document.removeEventListener('touchstart', closeOnOutside);
+    };
+  }, [isCoverMenuOpen]);
+
+  useEffect(() => {
+    if (!isEditing || !scrollToEditSection) return;
+    const timer = window.setTimeout(() => {
+      editSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      setScrollToEditSection(false);
+    }, 30);
+    return () => window.clearTimeout(timer);
+  }, [isEditing, scrollToEditSection]);
+
+  useEffect(() => {
+    if (!isCoverCropOpen || !coverCropSource || !coverImageSize || !coverCropPreviewRef.current) return;
+    let cancelled = false;
+    const image = new Image();
+    image.onload = () => {
+      if (cancelled || !coverCropPreviewRef.current) return;
+      const canvas = coverCropPreviewRef.current;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      canvas.width = 960;
+      canvas.height = 300;
+      const rect = getCoverCropRect(
+        coverImageSize.width,
+        coverImageSize.height,
+        coverCropZoom,
+        coverCropX,
+        coverCropY
+      );
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(
+        image,
+        rect.sourceX,
+        rect.sourceY,
+        rect.cropWidth,
+        rect.cropHeight,
+        0,
+        0,
+        canvas.width,
+        canvas.height
+      );
+    };
+    image.src = coverCropSource;
+    return () => {
+      cancelled = true;
+    };
+  }, [isCoverCropOpen, coverCropSource, coverImageSize, coverCropZoom, coverCropX, coverCropY]);
 
   const fetchRelationship = async (targetUserId: string, profileAccessLevel?: string) => {
     try {
@@ -291,7 +515,8 @@ const ProfilePage = () => {
         const resolvedAccessLevel = data.accessLevel || '';
         const normalizedProfile = {
           ...data.profile,
-          photos: toSinglePhotoArray(data.profile?.photos)
+          photos: toSinglePhotoArray(data.profile?.photos),
+          coverPhoto: data.profile?.coverPhoto || ''
         };
         const currentUserId = normalizeId(localStorage.getItem('userId'));
         const resolvedProfileUserId = normalizeId(normalizedProfile?.userId);
@@ -324,28 +549,37 @@ const ProfilePage = () => {
   };
 
   const handleEdit = () => {
+    setIsSettingsMenuOpen(false);
+    setIsCoverMenuOpen(false);
     setIsEditing(true);
+    setScrollToEditSection(true);
     setPhotoError('');
+    setCoverError('');
   };
 
   const handleCancel = () => {
     setIsEditing(false);
     setFormData(profile);
     setPhotoError('');
+    setCoverError('');
   };
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
     setFormData({ ...formData, [e.target.name]: e.target.value });
   };
 
-  const compressImageToBase64 = (file: File): Promise<string> =>
+  const compressImageToBase64 = (
+    file: File,
+    options?: { maxWidth?: number; maxHeight?: number; quality?: number }
+  ): Promise<string> =>
     new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = () => {
         const img = new Image();
         img.onload = () => {
-          const maxWidth = 720;
-          const maxHeight = 720;
+          const maxWidth = options?.maxWidth ?? 720;
+          const maxHeight = options?.maxHeight ?? 720;
+          const quality = options?.quality ?? 0.78;
           const scale = Math.min(maxWidth / img.width, maxHeight / img.height, 1);
           const width = Math.round(img.width * scale);
           const height = Math.round(img.height * scale);
@@ -360,7 +594,7 @@ const ProfilePage = () => {
           }
 
           ctx.drawImage(img, 0, 0, width, height);
-          resolve(canvas.toDataURL('image/jpeg', 0.78));
+          resolve(canvas.toDataURL('image/jpeg', quality));
         };
         img.onerror = () => reject(new Error('Image decode failed'));
         img.src = String(reader.result || '');
@@ -394,7 +628,8 @@ const ProfilePage = () => {
     const data = await response.json();
     const normalizedProfile = {
       ...data.profile,
-      photos: toSinglePhotoArray(data.profile?.photos)
+      photos: toSinglePhotoArray(data.profile?.photos),
+      coverPhoto: data.profile?.coverPhoto || ''
     };
     setProfile(normalizedProfile);
     setFormData(normalizedProfile);
@@ -424,6 +659,122 @@ const ProfilePage = () => {
       setPhotoError('Failed to update profile photo. Please try again.');
     } finally {
       setPhotoUploading(false);
+    }
+  };
+
+  const handleCoverPhotoFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file || !isOwnProfile) return;
+    event.target.value = '';
+
+    const allowedTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
+    if (!allowedTypes.includes(file.type)) {
+      setCoverError('Please upload a JPEG, PNG, WebP, or GIF image.');
+      return;
+    }
+
+    try {
+      setCoverError('');
+      setCoverCropError('');
+      const source = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ''));
+        reader.onerror = () => reject(new Error('File read failed'));
+        reader.readAsDataURL(file);
+      });
+      const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => resolve(img);
+        img.onerror = () => reject(new Error('Image decode failed'));
+        img.src = source;
+      });
+      setCoverImageSize({ width: image.naturalWidth || image.width, height: image.naturalHeight || image.height });
+      setCoverCropSource(source);
+      setCoverCropZoom(1);
+      setCoverCropX(50);
+      setCoverCropY(50);
+      setIsCoverCropOpen(true);
+      setIsCoverMenuOpen(false);
+    } catch (error) {
+      console.error('Failed to prepare cover photo:', error);
+      setCoverError('Failed to load cover image. Please try again.');
+    }
+  };
+
+  const handleApplyCoverCrop = async () => {
+    if (!coverCropSource || !coverImageSize) return;
+    try {
+      setCoverUploading(true);
+      setCoverCropError('');
+      setCoverError('');
+      const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => resolve(img);
+        img.onerror = () => reject(new Error('Image decode failed'));
+        img.src = coverCropSource;
+      });
+
+      const outputWidth = 1600;
+      const outputHeight = 500;
+      const rect = getCoverCropRect(
+        coverImageSize.width,
+        coverImageSize.height,
+        coverCropZoom,
+        coverCropX,
+        coverCropY
+      );
+
+      const canvas = document.createElement('canvas');
+      canvas.width = outputWidth;
+      canvas.height = outputHeight;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) throw new Error('Canvas not supported');
+      ctx.drawImage(
+        image,
+        rect.sourceX,
+        rect.sourceY,
+        rect.cropWidth,
+        rect.cropHeight,
+        0,
+        0,
+        outputWidth,
+        outputHeight
+      );
+      const cropped = canvas.toDataURL('image/jpeg', 0.84);
+      const payload = buildProfilePayload(formData);
+      payload.coverPhoto = cropped;
+      await saveProfilePayload(payload);
+
+      setIsCoverCropOpen(false);
+      setCoverCropSource(null);
+      setCoverImageSize(null);
+      setIsCoverMenuOpen(false);
+    } catch (error) {
+      console.error('Failed to apply cover crop:', error);
+      setCoverCropError('Failed to save cover. Please try again.');
+    } finally {
+      setCoverUploading(false);
+    }
+  };
+
+  const handleRemoveCoverPhoto = async () => {
+    if (!isOwnProfile) return;
+    try {
+      setCoverUploading(true);
+      setCoverError('');
+      setCoverCropError('');
+      const payload = buildProfilePayload(formData);
+      payload.coverPhoto = '';
+      await saveProfilePayload(payload);
+      setIsCoverMenuOpen(false);
+      setIsCoverCropOpen(false);
+      setCoverCropSource(null);
+      setCoverImageSize(null);
+    } catch (error) {
+      console.error('Failed to remove cover photo:', error);
+      setCoverError('Failed to remove cover photo. Please try again.');
+    } finally {
+      setCoverUploading(false);
     }
   };
 
@@ -808,15 +1159,31 @@ const ProfilePage = () => {
     }
   };
 
+  const clearSessionData = () => {
+    localStorage.removeItem('token');
+    localStorage.removeItem('userId');
+    localStorage.removeItem('privateKey');
+    localStorage.removeItem('publicKey');
+    sessionStorage.removeItem('token');
+    sessionStorage.removeItem('userId');
+    sessionStorage.removeItem('privateKey');
+    sessionStorage.removeItem('publicKey');
+  };
+
+  const handleLogout = () => {
+    setIsSettingsMenuOpen(false);
+    setShowChangePassword(false);
+    setShowDeleteConfirm(false);
+    clearSessionData();
+    navigate('/login', { replace: true });
+  };
+
   const handleDeleteAccount = async () => {
     const userId = localStorage.getItem('userId');
     if (!userId) return;
-    const confirmed = window.confirm(
-      'Delete your account permanently? This action cannot be undone.'
-    );
-    if (!confirmed) return;
 
     try {
+      setDeleteLoading(true);
       const token = localStorage.getItem('token');
       const response = await fetch(`${API_URL}/api/profiles/${userId}`, {
         method: 'DELETE',
@@ -828,13 +1195,15 @@ const ProfilePage = () => {
         throw new Error(data?.error?.message || 'Failed to delete account');
       }
 
-      localStorage.removeItem('token');
-      localStorage.removeItem('userId');
-      localStorage.removeItem('privateKey');
-      localStorage.removeItem('publicKey');
-      navigate('/register');
+      setShowDeleteConfirm(false);
+      setIsSettingsMenuOpen(false);
+      setShowChangePassword(false);
+      clearSessionData();
+      navigate('/', { replace: true });
     } catch (error: any) {
       setPasswordError(error?.message || 'Failed to delete account');
+    } finally {
+      setDeleteLoading(false);
     }
   };
 
@@ -847,6 +1216,7 @@ const ProfilePage = () => {
   }
 
   const primaryPhoto = profile.photos?.[0] || '';
+  const coverPhoto = String(profile.coverPhoto || '').trim();
   const verified = Boolean(profile.verified || profile.verification);
   const isPublicView = !isOwnProfile;
   const displayReligion = formatReligion(profile.religion, profile.religionOther) || 'Not shared';
@@ -889,23 +1259,143 @@ const ProfilePage = () => {
     Boolean(completionPhoto)
   ];
   const completionScore = Math.round((completionChecks.filter(Boolean).length / completionChecks.length) * 100);
+  const mutualNames = mutualFriends.map((friend) => friend.name).filter(Boolean).join(', ');
+  const mutualLine = mutualCount > 0
+    ? `${mutualCount} mutual ${mutualCount === 1 ? 'friend' : 'friends'}${mutualNames ? ` | ${mutualNames}` : ''}`
+    : 'Connect to discover mutual friends';
+  const proposeIsRevert = isMatched || Boolean(matchStatus?.likedByMe);
+  const proposeLabel = proposeIsRevert ? (isMatched ? 'Break Up' : 'Withdraw Proposal') : 'Propose';
 
   return (
     <div className="profile-page">
       <AppContainer className="profile-shell" size="sm">
-        <div className="profile-topbar">
-          <button className="profile-nav-btn" onClick={() => navigate('/home')} aria-label="Go back">
-            <BackIcon />
-          </button>
-          {isOwnProfile && !isEditing && (
-            <button className="profile-edit-btn" onClick={handleEdit}>
-              Edit Profile
+        <div className="profile-scroll-body">
+          <div className="profile-topbar">
+            <button className="profile-nav-btn" onClick={() => navigate('/home')} aria-label="Go back">
+              <BackIcon />
             </button>
-          )}
-        </div>
+            {isOwnProfile && (
+              <div className="profile-settings-wrap" ref={settingsMenuRef}>
+                <button
+                  className="profile-more-btn"
+                  onClick={() => setIsSettingsMenuOpen((prev) => !prev)}
+                  aria-label="Profile settings"
+                  aria-expanded={isSettingsMenuOpen}
+                >
+                  <MoreIcon />
+                </button>
+                {isSettingsMenuOpen && (
+                  <div className="profile-settings-menu" role="menu" aria-label="Profile settings">
+                    <button
+                      type="button"
+                      className="profile-settings-item"
+                      role="menuitem"
+                      onClick={() => {
+                        setIsSettingsMenuOpen(false);
+                        handleEdit();
+                      }}
+                    >
+                      <EditIcon />
+                      <span>Edit Profile</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="profile-settings-item"
+                      role="menuitem"
+                      onClick={() => {
+                        setIsSettingsMenuOpen(false);
+                        setPasswordError('');
+                        setPasswordMessage('');
+                        setShowChangePassword(true);
+                      }}
+                    >
+                      <LockIcon />
+                      <span>Change Password</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="profile-settings-item"
+                      role="menuitem"
+                      onClick={handleLogout}
+                    >
+                      <LogoutIcon />
+                      <span>Logout</span>
+                    </button>
+                    <div className="profile-settings-divider" aria-hidden="true" />
+                    <button
+                      type="button"
+                      className="profile-settings-item profile-settings-item-danger"
+                      role="menuitem"
+                      onClick={() => {
+                        setIsSettingsMenuOpen(false);
+                        setShowDeleteConfirm(true);
+                      }}
+                    >
+                      <TrashIcon />
+                      <span>Delete Account</span>
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
 
-        <section className="profile-hero">
-          <div className="profile-hero-bg"></div>
+          <section className="profile-hero">
+          <div
+            className={`profile-hero-bg${coverPhoto ? ' profile-hero-bg-has-image' : ''}`}
+            style={
+              coverPhoto
+                ? {
+                    backgroundImage: `linear-gradient(rgba(12, 35, 72, 0.2), rgba(12, 35, 72, 0.2)), url(${coverPhoto})`
+                  }
+                : undefined
+            }
+          >
+            {isOwnProfile && (
+              <div className="profile-cover-menu-wrap" ref={coverMenuRef}>
+                <button
+                  type="button"
+                  className="profile-cover-edit-btn"
+                  onClick={() => {
+                    if (coverUploading) return;
+                    setCoverError('');
+                    setIsCoverMenuOpen((prev) => !prev);
+                  }}
+                  disabled={coverUploading}
+                  aria-label={coverPhoto ? 'Edit cover photo' : 'Add cover photo'}
+                  aria-expanded={isCoverMenuOpen}
+                >
+                  {coverUploading ? 'Saving...' : (coverPhoto ? 'Edit Cover' : 'Add Cover')}
+                </button>
+                {isCoverMenuOpen && (
+                  <div className="profile-cover-menu">
+                    <button
+                      type="button"
+                      className="profile-cover-menu-item"
+                      onClick={() => {
+                        setIsCoverMenuOpen(false);
+                        coverInputRef.current?.click();
+                      }}
+                      disabled={coverUploading}
+                    >
+                      {coverPhoto ? 'Change Cover' : 'Upload Cover'}
+                    </button>
+                    {coverPhoto && (
+                      <button
+                        type="button"
+                        className="profile-cover-menu-item profile-cover-menu-item-danger"
+                        onClick={handleRemoveCoverPhoto}
+                        disabled={coverUploading}
+                      >
+                        Remove Cover
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+          {isOwnProfile && coverError && <p className="profile-cover-error">{coverError}</p>}
           <div
             role="button"
             tabIndex={0}
@@ -956,119 +1446,20 @@ const ProfilePage = () => {
           <div className="profile-identity">
             <h1>
               {profile.name || 'Unknown User'}
-              {showHeart && <span className="profile-match-heart" title="Matched">💖</span>}
+              {showHeart && (
+                <span className="profile-match-heart" title="Matched" role="img" aria-label="Matched">
+                  {'\u2764\uFE0F'}
+                </span>
+              )}
             </h1>
             {profile.username && <p className="profile-username">@{profile.username}</p>}
-            <p>{displayProfession}</p>
+            <p className="profile-role">{displayProfession}</p>
             <div className="profile-badges">
               {profile.age && <span className="owner-badge">{profile.age} yrs</span>}
               {displayReligion !== 'Not shared' && <span className="owner-badge">{displayReligion}</span>}
               {verified && <span className="verified-badge">Verified</span>}
             </div>
           </div>
-
-          {isPublicView && (
-            <div className="profile-hero-actions">
-              {relationshipStatus === 'connected' ? (
-                <>
-                  <button
-                    type="button"
-                    className="profile-action-danger"
-                    onClick={unfriendUser}
-                    disabled={relationshipLoading}
-                  >
-                    {relationshipLoading ? 'Updating...' : 'Unfriend'}
-                  </button>
-                  <button type="button" className="profile-action-primary" onClick={openChatWithUser}>
-                    Chat
-                  </button>
-                  <button type="button" className="profile-action-primary" onClick={openFriendList}>
-                    Friend List
-                  </button>
-                  {canShowLikeButton && (
-                    (isMatched || Boolean(matchStatus?.likedByMe)) ? (
-                      <button
-                        type="button"
-                        className="profile-action-secondary"
-                        onClick={unlikeProfile}
-                        disabled={matchLoading}
-                      >
-                        {matchLoading ? 'Updating...' : (isMatched ? 'Break Up' : 'Withdraw Proposal')}
-                      </button>
-                    ) : (
-                      <button
-                        type="button"
-                        className="profile-action-secondary"
-                        onClick={likeProfile}
-                        disabled={matchLoading}
-                      >
-                        {matchLoading ? 'Updating...' : 'Propose'}
-                      </button>
-                    )
-                  )}
-                  <button
-                    type="button"
-                    className="profile-action-danger"
-                    onClick={blockUser}
-                    disabled={relationshipLoading}
-                  >
-                    {relationshipLoading ? 'Updating...' : 'Block'}
-                  </button>
-                </>
-              ) : relationshipStatus === 'blocked' ? (
-                blockedBySelf ? (
-                  <button
-                    type="button"
-                    className="profile-action-primary profile-action-full"
-                    onClick={unblockUser}
-                    disabled={relationshipLoading}
-                  >
-                    {relationshipLoading ? 'Updating...' : 'Unblock'}
-                  </button>
-                ) : (
-                  <button type="button" className="profile-action-muted profile-action-full" disabled>
-                    You are blocked
-                  </button>
-                )
-              ) : relationshipStatus === 'request_sent' ? (
-                justSentRequest ? (
-                  <button type="button" className="profile-action-muted profile-action-full" disabled>
-                    Request Sent
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    className="profile-action-danger profile-action-full"
-                    onClick={cancelConnectionRequest}
-                    disabled={relationshipLoading}
-                  >
-                    {relationshipLoading ? 'Cancelling...' : 'Cancel Connection Request'}
-                  </button>
-                )
-              ) : relationshipStatus === 'request_received' ? (
-                <button type="button" className="profile-action-primary" onClick={() => navigate('/connections')}>
-                  Review Request
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  className="profile-action-primary profile-action-full"
-                  onClick={sendConnectionRequest}
-                  disabled={relationshipLoading}
-                >
-                  {relationshipLoading ? 'Sending...' : '+ Add Friend'}
-                </button>
-              )}
-              {mutualCount > 0 && (
-                <p className="profile-mutuals">
-                  {mutualCount} mutual {mutualCount === 1 ? 'friend' : 'friends'}
-                  {mutualFriends.length > 0 ? ` • ${mutualFriends.map((friend) => friend.name).join(', ')}` : ''}
-                </p>
-              )}
-              {relationshipError && <p className="profile-connection-error">{relationshipError}</p>}
-              {matchError && <p className="profile-connection-error">{matchError}</p>}
-            </div>
-          )}
 
           {isOwnProfile && (
             <div className="profile-completion-card">
@@ -1100,8 +1491,82 @@ const ProfilePage = () => {
           )}
         </section>
 
+        {isPublicView && (
+          <section className="profile-card profile-interaction-card">
+            {relationshipStatus === 'connected' ? (
+              <>
+                <div className="profile-primary-actions">
+                  <button type="button" className="profile-primary-btn" onClick={openChatWithUser}>
+                    <MessageIcon />
+                    <span>Message</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="profile-primary-btn profile-primary-btn-special"
+                    onClick={proposeIsRevert ? unlikeProfile : likeProfile}
+                    disabled={!canShowLikeButton || matchLoading}
+                  >
+                    <ProposeIcon />
+                    <span>{matchLoading ? 'Updating...' : proposeLabel}</span>
+                  </button>
+                </div>
+                <button type="button" className="profile-secondary-btn" onClick={openFriendList}>
+                  Friend List
+                </button>
+                {mutualCount > 0 && <p className="profile-mutuals-inline">{mutualLine}</p>}
+              </>
+            ) : relationshipStatus === 'blocked' ? (
+              blockedBySelf ? (
+                <button
+                  type="button"
+                  className="profile-primary-btn profile-primary-btn-full"
+                  onClick={unblockUser}
+                  disabled={relationshipLoading}
+                >
+                  <span>{relationshipLoading ? 'Updating...' : 'Unblock'}</span>
+                </button>
+              ) : (
+                <button type="button" className="profile-muted-btn" disabled>
+                  You are blocked
+                </button>
+              )
+            ) : relationshipStatus === 'request_sent' ? (
+              justSentRequest ? (
+                <button type="button" className="profile-muted-btn" disabled>
+                  Request Sent
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="profile-secondary-btn"
+                  onClick={cancelConnectionRequest}
+                  disabled={relationshipLoading}
+                >
+                  {relationshipLoading ? 'Cancelling...' : 'Cancel Connection Request'}
+                </button>
+              )
+            ) : relationshipStatus === 'request_received' ? (
+              <button type="button" className="profile-primary-btn profile-primary-btn-full" onClick={() => navigate('/connections')}>
+                <span>Review Request</span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="profile-primary-btn profile-primary-btn-full"
+                onClick={sendConnectionRequest}
+                disabled={relationshipLoading}
+              >
+                <span>{relationshipLoading ? 'Sending...' : '+ Add Friend'}</span>
+              </button>
+            )}
+
+            {relationshipError && <p className="profile-connection-error">{relationshipError}</p>}
+            {matchError && <p className="profile-connection-error">{matchError}</p>}
+          </section>
+        )}
+
         {isEditing ? (
-          <section className="profile-card profile-edit-form">
+          <section className="profile-card profile-edit-form" ref={editSectionRef}>
             <h2>Edit Your Profile</h2>
             <div className="profile-form-grid">
               <div className="profile-form-group">
@@ -1288,94 +1753,258 @@ const ProfilePage = () => {
                 <p className="profile-empty-text">No achievements listed yet.</p>
               )}
             </section>
-
-            {isOwnProfile && (
-              <section className="profile-card quick-actions">
-                <h3>Quick Actions</h3>
-                <div className="quick-actions-grid">
-                  <button
-                    onClick={() => {
-                      setShowChangePassword((prev) => !prev);
-                      setPasswordError('');
-                      setPasswordMessage('');
-                    }}
-                  >
-                    Change Password
-                  </button>
-                  <button className="danger-action-button" onClick={handleDeleteAccount}>
-                    Delete Account Permanently
-                  </button>
-                </div>
-
-                {showChangePassword && (
-                  <div className="change-password-panel">
-                    <div className="change-password-row">
-                      <button
-                        type="button"
-                        className="change-password-otp-btn"
-                        onClick={requestChangePasswordOtp}
-                        disabled={passwordLoading}
-                      >
-                        {passwordLoading ? 'Sending OTP...' : 'Send OTP'}
-                      </button>
-                    </div>
-
-                    <div className="change-password-fields">
-                      <input
-                        type="password"
-                        name="currentPassword"
-                        value={passwordData.currentPassword}
-                        onChange={handlePasswordChangeInput}
-                        placeholder="Current password"
-                      />
-                      <input
-                        type="password"
-                        name="newPassword"
-                        value={passwordData.newPassword}
-                        onChange={handlePasswordChangeInput}
-                        placeholder="New password"
-                      />
-                      <input
-                        type="password"
-                        name="confirmPassword"
-                        value={passwordData.confirmPassword}
-                        onChange={handlePasswordChangeInput}
-                        placeholder="Confirm new password"
-                      />
-                      <input
-                        type="text"
-                        name="otp"
-                        value={passwordData.otp}
-                        onChange={handlePasswordChangeInput}
-                        placeholder="OTP from email"
-                        disabled={!passwordOtpSent}
-                      />
-                    </div>
-
-                    <button
-                      type="button"
-                      className="change-password-confirm-btn"
-                      onClick={confirmChangePassword}
-                      disabled={passwordLoading || !passwordOtpSent}
-                    >
-                      {passwordLoading ? 'Updating...' : 'Confirm Password Change'}
-                    </button>
-
-                    {passwordMessage && <p className="password-message">{passwordMessage}</p>}
-                    {passwordError && <p className="password-error">{passwordError}</p>}
-                  </div>
-                )}
-              </section>
-            )}
           </div>
         )}
+        </div>
+
+        {isPublicView && (
+          <footer className="profile-footer">
+            <button
+              type="button"
+              className="profile-footer-action"
+              onClick={unfriendUser}
+              disabled={relationshipLoading || relationshipStatus !== 'connected'}
+            >
+              <UnfriendIcon />
+              <span>{relationshipLoading && relationshipStatus === 'connected' ? 'Updating...' : 'Unfriend'}</span>
+            </button>
+            <span className="profile-footer-divider" aria-hidden="true" />
+            <button
+              type="button"
+              className="profile-footer-action"
+              onClick={blockedBySelf ? unblockUser : blockUser}
+              disabled={relationshipLoading || (relationshipStatus === 'blocked' && !blockedBySelf)}
+            >
+              <BlockIcon />
+              <span>{relationshipLoading ? 'Updating...' : blockedBySelf ? 'Unblock' : 'Block'}</span>
+            </button>
+          </footer>
+        )}
       </AppContainer>
+
+      {showChangePassword && (
+        <div
+          className="profile-modal-backdrop"
+          onClick={() => {
+            if (passwordLoading) return;
+            setShowChangePassword(false);
+          }}
+        >
+          <div className="profile-modal-card" onClick={(e) => e.stopPropagation()}>
+            <div className="profile-modal-header">
+              <h3>Change Password</h3>
+              <button
+                type="button"
+                className="profile-modal-close"
+                onClick={() => setShowChangePassword(false)}
+                disabled={passwordLoading}
+                aria-label="Close password modal"
+              >
+                x
+              </button>
+            </div>
+
+            <div className="change-password-panel profile-change-password-panel">
+              <div className="change-password-row">
+                <button
+                  type="button"
+                  className="change-password-otp-btn"
+                  onClick={requestChangePasswordOtp}
+                  disabled={passwordLoading}
+                >
+                  {passwordLoading ? 'Sending OTP...' : 'Send OTP'}
+                </button>
+              </div>
+
+              <div className="change-password-fields">
+                <input
+                  type="password"
+                  name="currentPassword"
+                  value={passwordData.currentPassword}
+                  onChange={handlePasswordChangeInput}
+                  placeholder="Current password"
+                />
+                <input
+                  type="password"
+                  name="newPassword"
+                  value={passwordData.newPassword}
+                  onChange={handlePasswordChangeInput}
+                  placeholder="New password"
+                />
+                <input
+                  type="password"
+                  name="confirmPassword"
+                  value={passwordData.confirmPassword}
+                  onChange={handlePasswordChangeInput}
+                  placeholder="Confirm new password"
+                />
+                <input
+                  type="text"
+                  name="otp"
+                  value={passwordData.otp}
+                  onChange={handlePasswordChangeInput}
+                  placeholder="OTP from email"
+                  disabled={!passwordOtpSent}
+                />
+              </div>
+
+              <button
+                type="button"
+                className="change-password-confirm-btn"
+                onClick={confirmChangePassword}
+                disabled={passwordLoading || !passwordOtpSent}
+              >
+                {passwordLoading ? 'Updating...' : 'Confirm Password Change'}
+              </button>
+
+              {passwordMessage && <p className="password-message">{passwordMessage}</p>}
+              {passwordError && <p className="password-error">{passwordError}</p>}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showDeleteConfirm && (
+        <div
+          className="profile-modal-backdrop"
+          onClick={() => {
+            if (deleteLoading) return;
+            setShowDeleteConfirm(false);
+          }}
+        >
+          <div className="profile-modal-card profile-delete-modal" onClick={(e) => e.stopPropagation()}>
+            <h3>Delete Account</h3>
+            <p>Are you sure? This action is permanent.</p>
+            <div className="profile-modal-actions">
+              <button
+                type="button"
+                className="profile-modal-btn profile-modal-btn-secondary"
+                onClick={() => setShowDeleteConfirm(false)}
+                disabled={deleteLoading}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="profile-modal-btn profile-modal-btn-danger"
+                onClick={handleDeleteAccount}
+                disabled={deleteLoading}
+              >
+                {deleteLoading ? 'Deleting...' : 'Delete'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isCoverCropOpen && (
+        <div
+          className="profile-modal-backdrop"
+          onClick={() => {
+            if (coverUploading) return;
+            setIsCoverCropOpen(false);
+            setCoverCropSource(null);
+            setCoverImageSize(null);
+          }}
+        >
+          <div className="profile-modal-card profile-cover-crop-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="profile-modal-header">
+              <h3>Crop Cover Photo</h3>
+              <button
+                type="button"
+                className="profile-modal-close"
+                onClick={() => {
+                  setIsCoverCropOpen(false);
+                  setCoverCropSource(null);
+                  setCoverImageSize(null);
+                }}
+                disabled={coverUploading}
+                aria-label="Close cover crop modal"
+              >
+                x
+              </button>
+            </div>
+
+            <div className="profile-cover-crop-preview">
+              <canvas ref={coverCropPreviewRef} />
+            </div>
+
+            <div className="profile-cover-crop-controls">
+              <label>
+                Zoom
+                <input
+                  type="range"
+                  min={1}
+                  max={3}
+                  step={0.01}
+                  value={coverCropZoom}
+                  onChange={(e) => setCoverCropZoom(parseFloat(e.target.value))}
+                />
+              </label>
+              <label>
+                Horizontal
+                <input
+                  type="range"
+                  min={0}
+                  max={100}
+                  step={1}
+                  value={coverCropX}
+                  onChange={(e) => setCoverCropX(parseInt(e.target.value, 10))}
+                />
+              </label>
+              <label>
+                Vertical
+                <input
+                  type="range"
+                  min={0}
+                  max={100}
+                  step={1}
+                  value={coverCropY}
+                  onChange={(e) => setCoverCropY(parseInt(e.target.value, 10))}
+                />
+              </label>
+            </div>
+
+            {coverCropError && <p className="profile-cover-error">{coverCropError}</p>}
+
+            <div className="profile-modal-actions">
+              <button
+                type="button"
+                className="profile-modal-btn profile-modal-btn-secondary"
+                onClick={() => {
+                  setIsCoverCropOpen(false);
+                  setCoverCropSource(null);
+                  setCoverImageSize(null);
+                }}
+                disabled={coverUploading}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="profile-modal-btn profile-modal-btn-primary"
+                onClick={handleApplyCoverCrop}
+                disabled={coverUploading}
+              >
+                {coverUploading ? 'Saving...' : 'Apply Crop'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <input
         ref={photoInputRef}
         type="file"
         accept="image/jpeg,image/png,image/webp,image/gif"
         onChange={handleProfilePhotoFile}
+        className="hidden-photo-input"
+      />
+      <input
+        ref={coverInputRef}
+        type="file"
+        accept="image/jpeg,image/png,image/webp,image/gif"
+        onChange={handleCoverPhotoFile}
         className="hidden-photo-input"
       />
 
@@ -1398,7 +2027,7 @@ const ProfilePage = () => {
             }}
             aria-label="Close photo preview"
           >
-            ×
+            x
           </button>
           <div className="photo-lightbox-body" onClick={(e) => e.stopPropagation()}>
             {selectedPhoto ? (

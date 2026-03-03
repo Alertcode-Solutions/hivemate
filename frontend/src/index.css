@@ -7,7 +7,10 @@
   -ms-user-select: none;
   user-select: none;
 }
-
+::-webkit-scrollbar{
+  display: hidden;
+  width: 0;
+}
 html,
 body {
   overscroll-behavior-y: none;
