@@ -501,7 +501,7 @@
 
 @media (max-width: 768px) {
   .homepage {
-    padding-top: calc(104px + env(safe-area-inset-top));
+    padding-top: calc(94px + env(safe-area-inset-top));
     padding-bottom: calc(84px + env(safe-area-inset-bottom));
   }
 
@@ -590,7 +590,7 @@
   }
 
   .fused-tabs-shell {
-    margin-top: 0.7rem;
+    margin-top: 0.4rem;
     z-index: 1;
   }
 
