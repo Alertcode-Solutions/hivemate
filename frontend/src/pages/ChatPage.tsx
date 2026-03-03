@@ -1839,11 +1839,20 @@ const ChatPage = () => {
   };
 
   const filteredChatRooms = useMemo(() => {
-    const query = chatSearch.toLowerCase();
+    const query = chatSearch.trim().toLowerCase();
     const filtered = chatRooms.filter((room) => {
       const other = getOtherParticipant(room);
-      const haystack = `${other?.name || ''} ${other?.profession || ''}`.toLowerCase();
-      return haystack.includes(query);
+      if (!query) return true;
+
+      const normalizedName = String(other?.name || '').toLowerCase();
+      const normalizedProfession = String(other?.profession || '').toLowerCase();
+
+      // For 1-letter searches, avoid ultra-broad "contains" matching.
+      if (query.length === 1) {
+        return normalizedName.startsWith(query);
+      }
+
+      return normalizedName.includes(query) || normalizedProfession.includes(query);
     });
 
     return filtered.sort((a, b) => {

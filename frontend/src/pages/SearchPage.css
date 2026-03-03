@@ -1,6 +1,8 @@
 .search-page {
   min-height: 100vh;
   padding: 1rem 0 2.5rem;
+  overflow-x: hidden;
+  touch-action: pan-y;
   background:
     radial-gradient(980px 520px at 12% -8%, rgba(37, 99, 235, 0.2), transparent 68%),
     radial-gradient(980px 620px at 88% -14%, rgba(124, 58, 237, 0.14), transparent 70%),
@@ -172,6 +174,18 @@
   background: rgba(255, 255, 255, 0.86);
   padding: 0.8rem;
   margin-bottom: 0.8rem;
+  position: relative;
+  z-index: 2;
+}
+
+.search-page .search-container,
+.search-page .search-results,
+.search-page .filter-panel,
+.search-page .filter-grid,
+.search-page .profile-results,
+.search-page .profile-card,
+.search-page .profile-card-main {
+  touch-action: pan-y;
 }
 
 .search-page .filter-header {
@@ -503,6 +517,10 @@
 }
 
 @media (max-width: 768px) {
+  .search-page {
+    padding-bottom: calc(2.5rem + env(safe-area-inset-bottom));
+  }
+
   .search-page .search-header,
   .search-page .search-container {
     padding-left: 0.75rem;

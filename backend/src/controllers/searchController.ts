@@ -12,6 +12,7 @@ export const searchProfiles = async (req: Request, res: Response) => {
       username,
       skills,
       profession,
+      locations,
       niche,
       distance,
       lat,
@@ -31,6 +32,18 @@ export const searchProfiles = async (req: Request, res: Response) => {
       baseFilter.profession = { $regex: profession, $options: 'i' };
     }
 
+    if (Array.isArray(locations) && locations.length > 0) {
+      const normalizedLocations = locations
+        .map((location: any) => String(location || '').trim())
+        .filter(Boolean);
+
+      if (normalizedLocations.length > 0) {
+        baseFilter.place = {
+          $in: normalizedLocations.map((location: string) => new RegExp(`^${escapeRegex(location)}$`, 'i'))
+        };
+      }
+    }
+
     if (niche) {
       // Search in optimized keywords
       baseFilter.optimizedKeywords = { $in: [niche] };
@@ -39,15 +52,21 @@ export const searchProfiles = async (req: Request, res: Response) => {
     const searchQuery = String(query || '').trim();
     const usernameQuery = String(username || '').trim().toLowerCase();
     const profileTextFilter =
-      searchQuery.length > 0
+      searchQuery.length === 1
         ? {
-            $or: [
-              { name: { $regex: escapeRegex(searchQuery), $options: 'i' } },
-              { profession: { $regex: escapeRegex(searchQuery), $options: 'i' } },
-              { bio: { $regex: escapeRegex(searchQuery), $options: 'i' } }
-            ]
+            // Keep 1-letter queries narrow and intentional.
+            $or: [{ name: { $regex: `^${escapeRegex(searchQuery)}`, $options: 'i' } }]
           }
-        : {};
+        : searchQuery.length > 1
+          ? {
+              $or: [
+                { name: { $regex: escapeRegex(searchQuery), $options: 'i' } },
+                { profession: { $regex: escapeRegex(searchQuery), $options: 'i' } },
+                { place: { $regex: escapeRegex(searchQuery), $options: 'i' } },
+                { bio: { $regex: escapeRegex(searchQuery), $options: 'i' } }
+              ]
+            }
+          : {};
 
     let usernameMatchedUserIds: string[] = [];
     if (usernameQuery) {

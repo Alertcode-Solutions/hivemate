@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { getApiBaseUrl } from '../utils/runtimeConfig';
 import { goToProfile, resolveProfileTarget } from '../utils/profileRouting';
@@ -9,7 +9,7 @@ interface SearchFilters {
   query: string;
   skills: string[];
   profession: string;
-  distance: number;
+  locations: string[];
 }
 
 interface Profile {
@@ -69,34 +69,30 @@ const SearchPage = () => {
     query: '',
     skills: [],
     profession: '',
-    distance: 0
+    locations: []
   });
   const [skillInput, setSkillInput] = useState('');
-  const [suggestions, setSuggestions] = useState<string[]>([]);
+  const [locationInput, setLocationInput] = useState('');
+  const [skillSuggestions, setSkillSuggestions] = useState<string[]>([]);
+  const [locationSuggestions, setLocationSuggestions] = useState<string[]>([]);
   const [profileResults, setProfileResults] = useState<Profile[]>([]);
   const [loading, setLoading] = useState(false);
-  const [userLocation, setUserLocation] = useState<{ lat: number; lng: number } | null>(null);
   const [showFilters, setShowFilters] = useState(false);
   const [recentProfiles, setRecentProfiles] = useState<RecentProfile[]>([]);
+  const keyboardBaseScrollYRef = useRef(0);
+  const keyboardLiftAppliedRef = useRef(false);
+  const keyboardWasOpenRef = useRef(false);
 
   const commonSkills = [
     'JavaScript', 'TypeScript', 'Python', 'Java', 'React', 'Node.js', 'Angular', 'Vue.js',
     'MongoDB', 'PostgreSQL', 'AWS', 'Docker', 'Kubernetes', 'Machine Learning', 'Data Science',
     'UI/UX Design', 'Product Management', 'Marketing', 'Sales', 'Business Development'
   ];
-
-  useEffect(() => {
-    if (!navigator.geolocation) return;
-    navigator.geolocation.getCurrentPosition(
-      (position) => {
-        setUserLocation({
-          lat: position.coords.latitude,
-          lng: position.coords.longitude
-        });
-      },
-      () => undefined
-    );
-  }, []);
+  const commonLocations = [
+    'Mumbai', 'Delhi', 'Bengaluru', 'Hyderabad', 'Chennai', 'Pune', 'Kolkata',
+    'Ahmedabad', 'Jaipur', 'Lucknow', 'New York', 'San Francisco', 'Los Angeles',
+    'Chicago', 'Seattle', 'London', 'Toronto', 'Singapore', 'Dubai'
+  ];
 
   useEffect(() => {
     try {
@@ -128,9 +124,9 @@ const SearchPage = () => {
     let count = 0;
     if (filters.skills.length > 0) count++;
     if (filters.profession.trim()) count++;
-    if (userLocation && filters.distance > 0) count++;
+    if (filters.locations.length > 0) count++;
     return count;
-  }, [filters, userLocation]);
+  }, [filters]);
 
   const hasSearchInput = useMemo(() => {
     if (searchMode === 'gigs') return false;
@@ -138,9 +134,9 @@ const SearchPage = () => {
       filters.query.trim() ||
       filters.skills.length > 0 ||
       filters.profession.trim() ||
-      (userLocation && filters.distance > 0)
+      filters.locations.length > 0
     );
-  }, [filters, searchMode, userLocation]);
+  }, [filters, searchMode]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -172,11 +168,7 @@ const SearchPage = () => {
       }
       if (filters.skills.length > 0) body.skills = filters.skills;
       if (filters.profession.trim()) body.profession = filters.profession.trim();
-      if (userLocation && filters.distance > 0) {
-        body.distance = filters.distance;
-        body.lat = userLocation.lat;
-        body.lng = userLocation.lng;
-      }
+      if (filters.locations.length > 0) body.locations = filters.locations;
 
       const response = await fetch(`${API_URL}/api/search/profiles`, {
         method: 'POST',
@@ -203,13 +195,13 @@ const SearchPage = () => {
   const handleSkillInput = (value: string) => {
     setSkillInput(value);
     if (!value.trim()) {
-      setSuggestions([]);
+      setSkillSuggestions([]);
       return;
     }
     const filtered = commonSkills.filter((skill) => {
       return skill.toLowerCase().includes(value.toLowerCase()) && !filters.skills.includes(skill);
     });
-    setSuggestions(filtered.slice(0, 6));
+    setSkillSuggestions(filtered.slice(0, 6));
   };
 
   const addSkill = (skill: string) => {
@@ -217,11 +209,41 @@ const SearchPage = () => {
     if (!clean || filters.skills.includes(clean)) return;
     setFilters((prev) => ({ ...prev, skills: [...prev.skills, clean] }));
     setSkillInput('');
-    setSuggestions([]);
+    setSkillSuggestions([]);
   };
 
   const removeSkill = (skill: string) => {
     setFilters((prev) => ({ ...prev, skills: prev.skills.filter((s) => s !== skill) }));
+  };
+
+  const handleLocationInput = (value: string) => {
+    setLocationInput(value);
+    if (!value.trim()) {
+      setLocationSuggestions([]);
+      return;
+    }
+    const normalized = value.toLowerCase();
+    const filtered = commonLocations.filter((location) => {
+      return location.toLowerCase().includes(normalized) && !filters.locations.includes(location);
+    });
+    setLocationSuggestions(filtered.slice(0, 6));
+  };
+
+  const addLocation = (location: string) => {
+    const clean = location.trim();
+    if (!clean) return;
+    const exists = filters.locations.some((item) => item.toLowerCase() === clean.toLowerCase());
+    if (exists) return;
+    setFilters((prev) => ({ ...prev, locations: [...prev.locations, clean] }));
+    setLocationInput('');
+    setLocationSuggestions([]);
+  };
+
+  const removeLocation = (location: string) => {
+    setFilters((prev) => ({
+      ...prev,
+      locations: prev.locations.filter((item) => item.toLowerCase() !== location.toLowerCase())
+    }));
   };
 
   const clearFilters = () => {
@@ -229,10 +251,12 @@ const SearchPage = () => {
       query: '',
       skills: [],
       profession: '',
-      distance: 0
+      locations: []
     });
     setSkillInput('');
-    setSuggestions([]);
+    setLocationInput('');
+    setSkillSuggestions([]);
+    setLocationSuggestions([]);
     setProfileResults([]);
   };
 
@@ -268,6 +292,75 @@ const SearchPage = () => {
 
   const getInitial = (name: string) => (name?.charAt(0).toUpperCase() || 'U');
 
+  useEffect(() => {
+    const isTypingField = (element: Element | null) => {
+      const target = element as HTMLElement | null;
+      if (!target) return false;
+      return (
+        target.tagName === 'INPUT' ||
+        target.tagName === 'TEXTAREA' ||
+        target.getAttribute('contenteditable') === 'true'
+      );
+    };
+
+    const getKeyboardOffset = () => {
+      const viewport = window.visualViewport;
+      if (!viewport) return 0;
+      return Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop);
+    };
+
+    const syncKeyboardScroll = () => {
+      const active = document.activeElement;
+      const hasTypingFocus = isTypingField(active);
+      const keyboardOffset = getKeyboardOffset();
+      const keyboardOpen = keyboardOffset > 120;
+      keyboardWasOpenRef.current = keyboardOpen;
+
+      if (keyboardOpen && hasTypingFocus && !keyboardLiftAppliedRef.current) {
+        keyboardLiftAppliedRef.current = true;
+        window.scrollTo({ top: keyboardBaseScrollYRef.current + 180, behavior: 'smooth' });
+      } else if (!keyboardOpen && keyboardLiftAppliedRef.current) {
+        keyboardLiftAppliedRef.current = false;
+        window.scrollTo(0, keyboardBaseScrollYRef.current);
+        window.setTimeout(() => window.scrollTo(0, keyboardBaseScrollYRef.current), 90);
+      }
+    };
+
+    const handleFocusIn = (event: FocusEvent) => {
+      if (!isTypingField(event.target as Element | null)) return;
+      keyboardBaseScrollYRef.current = window.scrollY;
+      keyboardLiftAppliedRef.current = false;
+      window.setTimeout(syncKeyboardScroll, 80);
+    };
+
+    const handleFocusOut = () => {
+      window.setTimeout(() => {
+        const keyboardOffset = getKeyboardOffset();
+        if (keyboardOffset <= 120 || !keyboardWasOpenRef.current) {
+          keyboardLiftAppliedRef.current = false;
+          window.scrollTo(0, keyboardBaseScrollYRef.current);
+        }
+      }, 120);
+    };
+
+    const viewport = window.visualViewport;
+    viewport?.addEventListener('resize', syncKeyboardScroll);
+    viewport?.addEventListener('scroll', syncKeyboardScroll);
+    document.addEventListener('focusin', handleFocusIn);
+    document.addEventListener('focusout', handleFocusOut);
+
+    return () => {
+      viewport?.removeEventListener('resize', syncKeyboardScroll);
+      viewport?.removeEventListener('scroll', syncKeyboardScroll);
+      document.removeEventListener('focusin', handleFocusIn);
+      document.removeEventListener('focusout', handleFocusOut);
+    };
+  }, []);
+
+  const toggleFilters = () => {
+    setShowFilters((prev) => !prev);
+  };
+
   return (
     <div className="search-page">
       <header className="search-header">
@@ -301,15 +394,22 @@ const SearchPage = () => {
         </div>
 
         <div className="search-filters-row">
-          <button className="filter-toggle-button" onClick={() => setShowFilters((prev) => !prev)} disabled={searchMode !== 'profiles'}>
+          <button
+            type="button"
+            className="filter-toggle-button"
+            onClick={toggleFilters}
+            disabled={searchMode !== 'profiles'}
+            aria-expanded={showFilters}
+            aria-controls="search-filter-panel"
+          >
             <FilterIcon />
-            <span>Filters</span>
+            <span>{showFilters ? 'Hide Filters' : 'Filters'}</span>
             {activeFilterCount > 0 && <strong>{activeFilterCount}</strong>}
           </button>
         </div>
 
         {showFilters && searchMode === 'profiles' && (
-          <div className="filter-panel">
+          <div id="search-filter-panel" className="filter-panel">
             <div className="filter-header">
               <h3>Filter Results</h3>
               <button className="clear-filters" onClick={clearFilters}>
@@ -330,9 +430,9 @@ const SearchPage = () => {
                       if (e.key === 'Enter' && skillInput.trim()) addSkill(skillInput);
                     }}
                   />
-                  {suggestions.length > 0 && (
+                  {skillSuggestions.length > 0 && (
                     <div className="autocomplete-suggestions">
-                      {suggestions.map((skill) => (
+                      {skillSuggestions.map((skill) => (
                         <button key={skill} type="button" className="suggestion-item" onClick={() => addSkill(skill)}>
                           {skill}
                         </button>
@@ -362,17 +462,43 @@ const SearchPage = () => {
                 />
               </div>
 
-              <div className="filter-section filter-section-range">
-                <label>Distance: {filters.distance} km</label>
-                <input
-                  type="range"
-                  min="0"
-                  max="100"
-                  value={filters.distance}
-                  onChange={(e) => setFilters((prev) => ({ ...prev, distance: parseInt(e.target.value, 10) }))}
-                  disabled={!userLocation}
-                />
-                {!userLocation && <p className="filter-note">Allow location to filter by distance</p>}
+              <div className="filter-section">
+                <label>Locations</label>
+                <div className="skill-input-container">
+                  <input
+                    type="text"
+                    placeholder="Add location"
+                    value={locationInput}
+                    onChange={(e) => handleLocationInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && locationInput.trim()) addLocation(locationInput);
+                    }}
+                  />
+                  {locationSuggestions.length > 0 && (
+                    <div className="autocomplete-suggestions">
+                      {locationSuggestions.map((location) => (
+                        <button
+                          key={location}
+                          type="button"
+                          className="suggestion-item"
+                          onClick={() => addLocation(location)}
+                        >
+                          {location}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <div className="selected-skills">
+                  {filters.locations.map((location) => (
+                    <span key={location} className="skill-tag">
+                      {location}
+                      <button type="button" onClick={() => removeLocation(location)} aria-label={`Remove ${location}`}>
+                        x
+                      </button>
+                    </span>
+                  ))}
+                </div>
               </div>
             </div>
           </div>
