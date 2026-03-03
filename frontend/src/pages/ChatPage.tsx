@@ -1619,11 +1619,15 @@ const ChatPage = () => {
     if (!targetElement) return;
 
     targetElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    setHighlightedMessageId(targetId);
+    targetElement.classList.remove('message-row-highlight');
+    void targetElement.offsetWidth;
+    targetElement.classList.add('message-row-highlight');
+    setHighlightedMessageId(null);
     if (highlightTimerRef.current !== null) {
       window.clearTimeout(highlightTimerRef.current);
     }
     highlightTimerRef.current = window.setTimeout(() => {
+      targetElement.classList.remove('message-row-highlight');
       setHighlightedMessageId(null);
     }, 1500);
   };

@@ -105,18 +105,36 @@ self.addEventListener('message', (event) => {
 
 // Push event - friend request notifications (PWA).
 self.addEventListener('push', (event) => {
-  if (!event.data) return;
+  console.log('[SW] Push ping received from FCM/APNs');
 
-  let payload = {};
-  try {
-    payload = event.data.json();
-  } catch {
-    payload = { title: 'HiveMate', body: event.data.text() };
+  const defaultPayload = { title: 'HiveMate', body: 'You have a new update.' };
+  let payload = { ...defaultPayload };
+
+  if (event.data) {
+    try {
+      const parsed = event.data.json();
+      if (parsed && typeof parsed === 'object') {
+        payload = { ...defaultPayload, ...parsed };
+      } else {
+        payload = { ...defaultPayload, body: String(parsed || defaultPayload.body) };
+      }
+      console.log('[SW] Parsed JSON payload:', payload);
+    } catch (err) {
+      console.error('[SW] Failed to parse JSON, falling back to text:', err);
+      try {
+        const textBody = event.data.text();
+        payload = { ...defaultPayload, body: textBody || defaultPayload.body };
+      } catch (textErr) {
+        console.error('[SW] Failed to parse text fallback:', textErr);
+      }
+    }
   }
+
   console.log('Push Payload:', payload);
 
   const title = payload.title || 'HiveMate';
-  const payloadData = payload.data || {};
+  const payloadData =
+    payload && typeof payload.data === 'object' && payload.data !== null ? payload.data : {};
   const pushSentAt = Number(payload.sentAt || payloadData.sentAt || 0);
   if (pushSentAt > 0) {
     const latencyMs = Date.now() - pushSentAt;
@@ -133,7 +151,7 @@ self.addEventListener('push', (event) => {
       : 'View request';
   const primaryAction = isCallNotification ? 'answer' : 'open';
   const options = {
-    body: payload.body || 'You have a new update.',
+    body: payload.body || 'You have a new message.',
     icon: payload.icon || '/icons.svg',
     badge: payload.badge || '/icons.svg',
     tag: payload.tag || 'hivemate-notification',
@@ -164,8 +182,11 @@ self.addEventListener('push', (event) => {
 
   const notificationPromise = self.registration
     .showNotification(title, options)
+    .then(() => {
+      console.log('[SW] showNotification painted successfully');
+    })
     .catch((err) => {
-      console.error('[SW] showNotification failed:', err);
+      console.error('[SW] showNotification FATAL ERROR:', err);
     });
 
   event.waitUntil(notificationPromise);
