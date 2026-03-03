@@ -182,6 +182,7 @@ const ChatPage = () => {
   const [peerOnline, setPeerOnline] = useState(false);
   const [peerLastSeen, setPeerLastSeen] = useState<string>('');
   const [showScrollToBottomButton, setShowScrollToBottomButton] = useState(false);
+  const [chatOpenError, setChatOpenError] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement | null>(null);
   const wsRef = useRef<Socket | null>(null);
@@ -223,6 +224,8 @@ const ChatPage = () => {
   const activeMessagesLoadRef = useRef(0);
   const roomMessagesCacheRef = useRef<Record<string, Message[]>>({});
   const decryptedMessageCacheRef = useRef<Record<string, { cipher: string; text: string }>>({});
+  const pendingOutgoingByRoomRef = useRef<Record<string, Message[]>>({});
+  const deletedChatTombstonesRef = useRef<Record<string, number>>({});
 
   const API_URL = getApiBaseUrl();
   const currentUserId = localStorage.getItem('userId');
@@ -342,6 +345,20 @@ const ChatPage = () => {
     }
   };
 
+  const mergeServerAndPendingMessages = (chatRoomId: string, serverMessages: Message[]) => {
+    const roomId = String(chatRoomId);
+    const pending = pendingOutgoingByRoomRef.current[roomId] || [];
+    if (!pending.length) return upsertMessagesById(serverMessages);
+    const merged = [...serverMessages];
+    const existingIds = new Set(serverMessages.map((message) => normalizeId(message.id)));
+    for (const pendingMessage of pending) {
+      if (!existingIds.has(normalizeId(pendingMessage.id))) {
+        merged.push(pendingMessage);
+      }
+    }
+    return upsertMessagesById(merged);
+  };
+
   const markUserScrolling = () => {
     isUserScrollingRef.current = true;
     if (userScrollIdleTimerRef.current !== null) {
@@ -392,6 +409,7 @@ const ChatPage = () => {
 
   const openChatRoom = (room: ChatRoom, options?: { pushMobileHistory?: boolean }) => {
     setChatActionSheet(null);
+    setChatOpenError('');
     setSelectedChatRoom(room);
     if (isMobileView) {
       setShowSidebarOnMobile(false);
@@ -404,6 +422,25 @@ const ChatPage = () => {
   const openUserProfile = (userId: string) => {
     if (!userId) return;
     goToProfile(navigate, userId);
+  };
+
+  const resolveChatTargetUserId = async (rawTargetId: string) => {
+    const normalizedTargetId = normalizeId(rawTargetId);
+    if (!normalizedTargetId) return '';
+    const token = localStorage.getItem('token');
+    if (!token) return normalizedTargetId;
+
+    try {
+      const response = await fetch(`${API_URL}/api/profiles/${normalizedTargetId}`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (!response.ok) return normalizedTargetId;
+
+      const data = await response.json().catch(() => ({}));
+      return normalizeId(data?.profile?.userId) || normalizedTargetId;
+    } catch {
+      return normalizedTargetId;
+    }
   };
 
   useEffect(() => {
@@ -485,8 +522,10 @@ const ChatPage = () => {
     const userIdFromUrl = new URLSearchParams(location.search).get('user');
     const normalizedRoomId = normalizeId(roomIdFromUrl);
     const normalizedUserId = normalizeId(userIdFromUrl);
+    const normalizedPathTargetId = normalizeId(friendshipId);
+    const hasDeepLinkTarget = Boolean(normalizedRoomId || normalizedUserId || normalizedPathTargetId);
 
-    if (!normalizedRoomId && !normalizedUserId) {
+    if (!hasDeepLinkTarget) {
       if (isMobileView && !selectedChatRoom) {
         setShowSidebarOnMobile(true);
       }
@@ -500,9 +539,12 @@ const ChatPage = () => {
     if (chatRooms.length > 0) {
       const targetRoom = normalizedRoomId
         ? chatRooms.find((room) => String(room.chatRoomId) === normalizedRoomId)
-        : chatRooms.find((room) =>
-            room.participants.some((participant) => normalizeId(participant.userId) === normalizedUserId)
-          );
+        : chatRooms.find((room) => {
+            const participantIds = room.participants.map((participant) => normalizeId(participant.userId));
+            if (normalizedUserId && participantIds.includes(normalizedUserId)) return true;
+            if (normalizedPathTargetId && participantIds.includes(normalizedPathTargetId)) return true;
+            return false;
+          });
       if (
         targetRoom &&
         String(targetRoom.chatRoomId) !== String(selectedChatRoom?.chatRoomId || '')
@@ -510,7 +552,7 @@ const ChatPage = () => {
         openChatRoom(targetRoom, { pushMobileHistory: false });
       }
     }
-  }, [location.search, isMobileView, chatRooms, selectedChatRoom]);
+  }, [location.search, isMobileView, chatRooms, selectedChatRoom, friendshipId]);
 
   useEffect(() => {
     if (!('serviceWorker' in navigator)) return;
@@ -673,13 +715,20 @@ const ChatPage = () => {
     const handleResize = () => {
       const mobile = window.innerWidth <= 768;
       const deepLinkedRoomId = normalizeId(new URLSearchParams(window.location.search).get('room'));
+      const deepLinkedUserId = normalizeId(new URLSearchParams(window.location.search).get('user'));
+      const deepLinkedPathId = normalizeId(friendshipId);
+      const hasDeepLinkTarget = Boolean(deepLinkedRoomId || deepLinkedUserId || deepLinkedPathId);
       setIsMobileView(mobile);
 
       if (!mobile) {
         setShowSidebarOnMobile(true);
-      } else if (deepLinkedRoomId) {
+      } else if (hasDeepLinkTarget) {
         setShowSidebarOnMobile(false);
-      } else if (!selectedChatRoomRef.current) {
+      } else if (selectedChatRoomRef.current && !showSidebarOnMobile) {
+        // Keep chat pane open if user is already in an active conversation view.
+        setShowSidebarOnMobile(false);
+      } else {
+        // Keep sidebar visible while browsing/searching chats.
         setShowSidebarOnMobile(true);
       }
     };
@@ -687,7 +736,7 @@ const ChatPage = () => {
     handleResize();
     window.addEventListener('resize', handleResize);
     return () => window.removeEventListener('resize', handleResize);
-  }, [location.search]);
+  }, [location.search, friendshipId, showSidebarOnMobile]);
 
   useLayoutEffect(() => {
     if (!isMobileView) {
@@ -827,6 +876,10 @@ const ChatPage = () => {
 
     const handleMessageReceive = async (data: any) => {
       console.log('Received message:', data);
+      const incomingRoomId = String(data?.chatRoomId || '');
+      if (incomingRoomId) {
+        delete deletedChatTombstonesRef.current[incomingRoomId];
+      }
 
       try {
         const keyPair = await EncryptionService.getKeyPair();
@@ -853,7 +906,30 @@ const ChatPage = () => {
           }
         }
 
-        loadChatRooms();
+        setChatRooms((prev) => {
+          const idx = prev.findIndex((room) => String(room.chatRoomId) === incomingRoomId);
+          if (idx < 0) {
+            void loadChatRooms();
+            return prev;
+          }
+          const updated = [...prev];
+          const room = updated[idx];
+          const nextRoom: ChatRoom = {
+            ...room,
+            lastMessage: {
+              encryptedContent: String(data.encryptedContent || ''),
+              timestamp: new Date(data.timestamp),
+              senderId: String(data.senderId || '')
+            },
+            lastMessageAt: new Date(data.timestamp),
+            unreadCount:
+              selectedChatRoomRef.current && String(selectedChatRoomRef.current.chatRoomId) === incomingRoomId
+                ? 0
+                : Number(room.unreadCount || 0) + 1
+          };
+          updated[idx] = nextRoom;
+          return updated;
+        });
       } catch (error) {
         if (selectedChatRoomRef.current && data.chatRoomId === selectedChatRoomRef.current.chatRoomId) {
           const unreadableMessage: Message = {
@@ -872,6 +948,21 @@ const ChatPage = () => {
             isAtBottomRef.current = true;
           }
         }
+        setChatRooms((prev) => {
+          const idx = prev.findIndex((room) => String(room.chatRoomId) === incomingRoomId);
+          if (idx < 0) return prev;
+          const updated = [...prev];
+          const room = updated[idx];
+          updated[idx] = {
+            ...room,
+            lastMessageAt: new Date(data.timestamp),
+            unreadCount:
+              selectedChatRoomRef.current && String(selectedChatRoomRef.current.chatRoomId) === incomingRoomId
+                ? 0
+                : Number(room.unreadCount || 0) + 1
+          };
+          return updated;
+        });
       }
     };
 
@@ -967,6 +1058,7 @@ const ChatPage = () => {
 
   const loadChatRooms = async () => {
     try {
+      setChatOpenError('');
       const token = localStorage.getItem('token');
       const response = await fetch(`${API_URL}/api/messages/chats`, {
         headers: { Authorization: `Bearer ${token}` }
@@ -974,9 +1066,12 @@ const ChatPage = () => {
 
       if (response.ok) {
         const data = await response.json();
-        const chats: ChatRoom[] = data.chats || [];
+        const chats: ChatRoom[] = (data.chats || []).filter(
+          (chat: ChatRoom) => !deletedChatTombstonesRef.current[String(chat.chatRoomId)]
+        );
         setChatRooms(chats);
-        await hydrateParticipantPhotos(chats);
+        // Do not block initial chat list render/open on profile photo hydration.
+        void hydrateParticipantPhotos(chats);
         
         // If room query is provided, select that exact chat first.
         const normalizedRoomId = normalizeId(
@@ -1016,17 +1111,19 @@ const ChatPage = () => {
 
         // If friendshipId is provided, select by participant user id.
         if (friendshipId && chats.length > 0) {
-          const targetId = normalizeId(friendshipId);
+          const directTargetId = normalizeId(friendshipId);
+          const resolvedTargetId = await resolveChatTargetUserId(directTargetId);
           const chat = chats.find((c: ChatRoom) =>
-            c.participants.some((p) => normalizeId(p.userId) === targetId)
+            c.participants.some((p) => normalizeId(p.userId) === resolvedTargetId)
           );
           if (chat) {
             openChatRoom(chat, { pushMobileHistory: false });
           } else {
-            await openDirectChat(targetId);
+            await openDirectChat(resolvedTargetId);
           }
         } else if (friendshipId && chats.length === 0) {
-          await openDirectChat(normalizeId(friendshipId));
+          const resolvedTargetId = await resolveChatTargetUserId(normalizeId(friendshipId));
+          await openDirectChat(resolvedTargetId);
         }
       }
     } catch (error) {
@@ -1036,21 +1133,28 @@ const ChatPage = () => {
     }
   };
 
-  const openDirectChat = async (targetUserId: string) => {
+  const openDirectChat = async (targetUserId: string): Promise<boolean> => {
     try {
       const token = localStorage.getItem('token');
       const normalizedTargetUserId = normalizeId(targetUserId);
-      if (!token || !normalizedTargetUserId) return;
+      if (!token || !normalizedTargetUserId) return false;
 
       const response = await fetch(`${API_URL}/api/messages/open/${normalizedTargetUserId}`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` }
       });
 
-      if (!response.ok) return;
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        setChatOpenError(errorData?.error?.message || 'Unable to open this chat right now.');
+        return false;
+      }
       const data = await response.json();
       const openedChat = data?.chat;
-      if (!openedChat) return;
+      if (!openedChat) {
+        setChatOpenError('Unable to open this chat right now.');
+        return false;
+      }
 
       setChatRooms((prev) => {
         const exists = prev.some((room) => String(room.chatRoomId) === String(openedChat.chatRoomId));
@@ -1058,11 +1162,15 @@ const ChatPage = () => {
         return [openedChat, ...prev];
       });
 
-      await hydrateParticipantPhotos([openedChat]);
+      void hydrateParticipantPhotos([openedChat]);
       openChatRoom(openedChat, { pushMobileHistory: false });
       openedUserQueryRef.current = '';
+      setChatOpenError('');
+      return true;
     } catch (error) {
       console.error('Failed to open direct chat:', error);
+      setChatOpenError('Unable to open this chat right now.');
+      return false;
     }
   };
 
@@ -1156,8 +1264,9 @@ const ChatPage = () => {
           forceScrollToBottomRef.current = true;
           isAtBottomRef.current = true;
         }
-        setMessages(upsertMessagesById(decryptedMessages));
-        roomMessagesCacheRef.current[String(chatRoomId)] = upsertMessagesById(decryptedMessages);
+        const mergedMessages = mergeServerAndPendingMessages(chatRoomId, decryptedMessages);
+        setMessages(mergedMessages);
+        roomMessagesCacheRef.current[String(chatRoomId)] = mergedMessages;
         if (isFirstLoadForRoom) {
           initialScrollDoneRef.current = normalizedRoomId;
         }
@@ -1196,6 +1305,7 @@ const ChatPage = () => {
     triggerHaptic(50);
     setSending(true);
     const tempMessageId = `temp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const roomId = String(selectedChatRoom.chatRoomId);
     try {
       const token = localStorage.getItem('token');
       const receiverId = selectedChatRoom.participants.find(
@@ -1219,6 +1329,12 @@ const ChatPage = () => {
         deletedForEveryone: false,
         reactions: []
       };
+      pendingOutgoingByRoomRef.current[roomId] = [
+        ...(pendingOutgoingByRoomRef.current[roomId] || []).filter(
+          (message) => normalizeId(message.id) !== tempMessageId
+        ),
+        optimisticMessage
+      ];
       appendMessageDedup(optimisticMessage);
       setMessageInput('');
       setReplyTarget(null);
@@ -1278,6 +1394,9 @@ const ChatPage = () => {
       if (response.ok) {
         const data = await response.json();
         const realMessageId = normalizeId(data.messageData.id);
+        pendingOutgoingByRoomRef.current[roomId] = (pendingOutgoingByRoomRef.current[roomId] || []).filter(
+          (message) => normalizeId(message.id) !== tempMessageId
+        );
         setMessages((prev) =>
           prev.map((message) =>
             normalizeId(message.id) === tempMessageId
@@ -1292,12 +1411,18 @@ const ChatPage = () => {
         );
         setActionSheet(null);
       } else {
+        pendingOutgoingByRoomRef.current[roomId] = (pendingOutgoingByRoomRef.current[roomId] || []).filter(
+          (message) => normalizeId(message.id) !== tempMessageId
+        );
         setMessages((prev) => prev.filter((message) => normalizeId(message.id) !== tempMessageId));
         const error = await response.json();
         alert(error.error?.message || 'Failed to send message');
       }
     } catch (error) {
       console.error('Failed to send message:', error);
+      pendingOutgoingByRoomRef.current[roomId] = (pendingOutgoingByRoomRef.current[roomId] || []).filter(
+        (message) => normalizeId(message.id) !== tempMessageId
+      );
       setMessages((prev) => prev.filter((message) => normalizeId(message.id) !== tempMessageId));
       alert('Failed to send message');
     } finally {
@@ -2029,6 +2154,7 @@ const ChatPage = () => {
   const deleteChatForMe = async (chatRoomId: string) => {
     const prevChatRooms = chatRooms;
     const normalizedRoomId = String(chatRoomId);
+    deletedChatTombstonesRef.current[normalizedRoomId] = Date.now();
     const wasSelected = String(selectedChatRoomRef.current?.chatRoomId || '') === String(chatRoomId);
     setChatRooms((prev) => prev.filter((room) => String(room.chatRoomId) !== String(chatRoomId)));
     setPinnedChatIds((prev) => prev.filter((id) => id !== normalizedRoomId));
@@ -2051,6 +2177,7 @@ const ChatPage = () => {
         headers: { Authorization: `Bearer ${token}` }
       });
       if (!response.ok) {
+        delete deletedChatTombstonesRef.current[normalizedRoomId];
         setChatRooms(prevChatRooms);
         if (wasSelected && prevChatRooms.length > 0) {
           const restored = prevChatRooms.find((room) => String(room.chatRoomId) === String(chatRoomId)) || null;
@@ -2061,6 +2188,7 @@ const ChatPage = () => {
       }
     } catch (error) {
       console.error('Delete chat failed:', error);
+      delete deletedChatTombstonesRef.current[normalizedRoomId];
       setChatRooms(prevChatRooms);
       if (wasSelected && prevChatRooms.length > 0) {
         const restored = prevChatRooms.find((room) => String(room.chatRoomId) === String(chatRoomId)) || null;
@@ -2586,6 +2714,7 @@ const ChatPage = () => {
           ) : (
             <div className="no-chat-selected">
               <p>Select a chat to start messaging</p>
+              {chatOpenError && <p>{chatOpenError}</p>}
             </div>
           )}
         </div>
