@@ -50,7 +50,9 @@ const DELETED_MESSAGE_TEXT = 'This message was deleted';
 const MESSAGE_REACTION_OPTIONS = ['\u{1F44D}', '\u{2764}\u{FE0F}', '\u{1F602}', '\u{1F62E}', '\u{1F622}', '\u{1F64F}'];
 const QUICK_EMOJIS = ['\u{1F600}', '\u{1F602}', '\u{1F60D}', '\u{1F44D}', '\u{1F389}', '\u{1F525}', '\u{1F64F}', '\u{2764}\u{FE0F}'];
 const ACTION_SHEET_WIDTH = 264;
+const CHAT_ACTION_SHEET_WIDTH = 220;
 const ACTION_SHEET_MARGIN = 10;
+const LONG_PRESS_DURATION_MS = 500;
 const SWIPE_REPLY_THRESHOLD = 40;
 const MAX_SWIPE_DISTANCE = 60;
 const PREVIEW_REPLY_CHARS = 90;
@@ -70,6 +72,12 @@ type MessageActionSheetPosition = {
   alignX: 'left' | 'right';
   alignY: 'above' | 'below';
 };
+
+type ChatActionSheetState = {
+  chatRoomId: string;
+  x: number;
+  y: number;
+} | null;
 
 type ReactionViewer = {
   userId: string;
@@ -156,6 +164,7 @@ const ChatPage = () => {
     callerId?: string;
   } | null>(null);
   const [actionSheet, setActionSheet] = useState<MessageActionSheetState>(null);
+  const [chatActionSheet, setChatActionSheet] = useState<ChatActionSheetState>(null);
   const [isPeerTyping, setIsPeerTyping] = useState(false);
   const [chatSearch, setChatSearch] = useState('');
   const [isMobileView, setIsMobileView] = useState(false);
@@ -170,6 +179,7 @@ const ChatPage = () => {
   const [focusedMessageId, setFocusedMessageId] = useState<string | null>(null);
   const [peerOnline, setPeerOnline] = useState(false);
   const [peerLastSeen, setPeerLastSeen] = useState<string>('');
+  const [showScrollToBottomButton, setShowScrollToBottomButton] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement | null>(null);
   const wsRef = useRef<Socket | null>(null);
@@ -181,6 +191,10 @@ const ChatPage = () => {
   const longPressTimerRef = useRef<number | null>(null);
   const longPressMovedRef = useRef(false);
   const activePointerIdRef = useRef<number | null>(null);
+  const chatLongPressTimerRef = useRef<number | null>(null);
+  const chatLongPressMovedRef = useRef(false);
+  const activeChatPointerIdRef = useRef<number | null>(null);
+  const chatLongPressTriggeredRef = useRef(false);
   const isAtBottomRef = useRef(true);
   const isUserScrollingRef = useRef(false);
   const userScrollIdleTimerRef = useRef<number | null>(null);
@@ -314,6 +328,7 @@ const ChatPage = () => {
     const { scrollTop, scrollHeight, clientHeight } = event.currentTarget;
     const distanceToBottom = scrollHeight - scrollTop - clientHeight;
     isAtBottomRef.current = distanceToBottom <= AUTO_SCROLL_BOTTOM_EPSILON;
+    setShowScrollToBottomButton(distanceToBottom > 220);
     if (focusedMessageId) {
       setFocusedMessageId(null);
     }
@@ -540,6 +555,7 @@ const ChatPage = () => {
   useEffect(() => {
     const closePopups = () => {
       setActionSheet(null);
+      setChatActionSheet(null);
       setShowEmojiPicker(false);
       setReactionSheetMessageId(null);
     };
@@ -1358,6 +1374,14 @@ const ChatPage = () => {
     [actionSheet, messages]
   );
   const myReactionOnActionSheetMessage = actionSheetMessage ? myReactionForMessage(actionSheetMessage) : '';
+  const actionSheetMessageIsDeletedForEveryone = Boolean(actionSheetMessage?.deletedForEveryone);
+  const actionSheetCanDeleteForEveryone = Boolean(actionSheet?.isOwn && !actionSheetMessageIsDeletedForEveryone);
+  const actionSheetCanCopy = Boolean(
+    actionSheetMessage &&
+    !actionSheetMessageIsDeletedForEveryone &&
+    String(actionSheetMessage.encryptedContent || '').trim().length > 0 &&
+    String(actionSheetMessage.encryptedContent || '').trim() !== DELETED_MESSAGE_TEXT
+  );
 
   const getReplyPreviewForMessage = (message: Message) => {
     const replyId = normalizeId(message.replyToMessageId);
@@ -1426,15 +1450,28 @@ const ChatPage = () => {
     const container = messagesContainerRef.current;
     if (container) {
       container.scrollTop = container.scrollHeight;
+      setShowScrollToBottomButton(false);
       return;
     }
     messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
+    setShowScrollToBottomButton(false);
   };
 
   const forceScrollToBottom = () => {
     forceScrollToBottomRef.current = true;
     isAtBottomRef.current = true;
+    setShowScrollToBottomButton(false);
     requestAnimationFrame(() => scrollToBottom());
+  };
+
+  const scrollToLatestMessage = () => {
+    const container = messagesContainerRef.current;
+    if (container) {
+      container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
+    } else {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+    setShowScrollToBottomButton(false);
   };
 
   const handleChatContainerPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -1575,7 +1612,7 @@ const ChatPage = () => {
     );
 
     const spaceBelow = viewportHeight - rect.bottom;
-    const sheetHeightEstimate = 188;
+    const sheetHeightEstimate = 280;
     const alignY: 'above' | 'below' = spaceBelow < sheetHeightEstimate ? 'above' : 'below';
     const y = alignY === 'above' ? rect.top - 8 : rect.bottom + 8;
 
@@ -1587,18 +1624,52 @@ const ChatPage = () => {
     };
   };
 
+  const buildChatActionSheetPosition = (rect: DOMRect) => {
+    const viewportWidth = window.innerWidth;
+    const x = Math.max(
+      ACTION_SHEET_MARGIN,
+      Math.min(rect.left, viewportWidth - CHAT_ACTION_SHEET_WIDTH - ACTION_SHEET_MARGIN)
+    );
+    const y = rect.bottom + 8;
+    return { x, y };
+  };
+
   const openActionSheetFromRect = (rect: DOMRect, message: Message, isOwnMessage: boolean) => {
-    if (message.deletedForEveryone) return;
     const position = buildActionSheetPosition(rect, isOwnMessage);
     setActionSheet({
       messageId: String(message.id),
       isOwn: isOwnMessage,
       ...position
     });
+    setChatActionSheet(null);
+    setShowEmojiPicker(false);
+  };
+
+  const openChatActionSheetFromRect = (rect: DOMRect, chatRoomId: string) => {
+    const position = buildChatActionSheetPosition(rect);
+    setChatActionSheet({
+      chatRoomId,
+      ...position
+    });
+    setActionSheet(null);
+    setFocusedMessageId(null);
     setShowEmojiPicker(false);
   };
 
   const handleMessageContextMenu = (
+    event: React.MouseEvent<HTMLDivElement>,
+    message: Message,
+    isOwnMessage: boolean
+  ) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const messageId = normalizeId(message.id);
+    setFocusedMessageId(messageId);
+    const rect = (event.currentTarget as HTMLDivElement).getBoundingClientRect();
+    openActionSheetFromRect(rect, message, isOwnMessage);
+  };
+
+  const handleMessageClick = (
     event: React.MouseEvent<HTMLDivElement>,
     message: Message,
     isOwnMessage: boolean
@@ -1627,7 +1698,7 @@ const ChatPage = () => {
       setFocusedMessageId(messageId);
       const rect = target.getBoundingClientRect();
       openActionSheetFromRect(rect, message, isOwnMessage);
-    }, 500);
+    }, LONG_PRESS_DURATION_MS);
   };
 
   const cancelMessageLongPress = () => {
@@ -1644,6 +1715,67 @@ const ChatPage = () => {
     if (Math.abs(event.movementX) > 6 || Math.abs(event.movementY) > 6) {
       longPressMovedRef.current = true;
       cancelMessageLongPress();
+    }
+  };
+
+  const prepareReplyFromMessage = (message: Message) => {
+    const messageId = normalizeId(message.id);
+    const senderName = normalizeId(message.senderId) === currentUserIdStr ? 'You' : getParticipantName(String(message.senderId));
+    const safeText = String(message.encryptedContent || '').replace(/\s+/g, ' ').trim().slice(0, PREVIEW_REPLY_CHARS);
+    const nextReplyTarget: ReplyTarget = {
+      messageId,
+      senderId: normalizeId(message.senderId),
+      senderName,
+      text: safeText || DELETED_MESSAGE_TEXT,
+      isOwn: normalizeId(message.senderId) === currentUserIdStr
+    };
+    setReplyTarget(nextReplyTarget);
+    replyTargetLockRef.current = nextReplyTarget;
+    messageInputRef.current?.focus();
+  };
+
+  const handleChatContextMenu = (
+    event: React.MouseEvent<HTMLDivElement>,
+    chatRoomId: string
+  ) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const rect = (event.currentTarget as HTMLDivElement).getBoundingClientRect();
+    openChatActionSheetFromRect(rect, chatRoomId);
+  };
+
+  const startChatLongPress = (
+    event: React.PointerEvent<HTMLDivElement>,
+    chatRoomId: string
+  ) => {
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
+    chatLongPressTriggeredRef.current = false;
+    chatLongPressMovedRef.current = false;
+    activeChatPointerIdRef.current = event.pointerId;
+    const target = event.currentTarget;
+    chatLongPressTimerRef.current = window.setTimeout(() => {
+      chatLongPressTimerRef.current = null;
+      if (chatLongPressMovedRef.current) return;
+      chatLongPressTriggeredRef.current = true;
+      const rect = target.getBoundingClientRect();
+      openChatActionSheetFromRect(rect, chatRoomId);
+    }, LONG_PRESS_DURATION_MS);
+  };
+
+  const cancelChatLongPress = () => {
+    if (chatLongPressTimerRef.current !== null) {
+      window.clearTimeout(chatLongPressTimerRef.current);
+      chatLongPressTimerRef.current = null;
+    }
+    activeChatPointerIdRef.current = null;
+  };
+
+  const moveChatLongPress = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (activeChatPointerIdRef.current === null) return;
+    if (event.pointerId !== activeChatPointerIdRef.current) return;
+    if (Math.abs(event.movementX) > 6 || Math.abs(event.movementY) > 6) {
+      chatLongPressMovedRef.current = true;
+      cancelChatLongPress();
     }
   };
 
@@ -1705,24 +1837,8 @@ const ChatPage = () => {
     if (Math.abs(diffY) > 42) return;
     if (diffX < SWIPE_REPLY_THRESHOLD) return;
 
-    const senderName = normalizeId(message.senderId) === currentUserIdStr ? 'You' : getParticipantName(String(message.senderId));
-    const safeText = String(message.encryptedContent || '').replace(/\s+/g, ' ').trim().slice(0, PREVIEW_REPLY_CHARS);
-    setReplyTarget({
-      messageId,
-      senderId: normalizeId(message.senderId),
-      senderName,
-      text: safeText,
-      isOwn: normalizeId(message.senderId) === currentUserIdStr
-    });
-    replyTargetLockRef.current = {
-      messageId,
-      senderId: normalizeId(message.senderId),
-      senderName,
-      text: safeText,
-      isOwn: normalizeId(message.senderId) === currentUserIdStr
-    };
+    prepareReplyFromMessage(message);
     triggerHaptic([30, 50, 30]);
-    messageInputRef.current?.focus();
   };
 
   const scrollToQuotedMessage = (replyToMessageId?: string | null) => {
@@ -1759,7 +1875,88 @@ const ChatPage = () => {
       console.error('Delete for me failed:', error);
     } finally {
       setActionSheet(null);
+      setFocusedMessageId(null);
     }
+  };
+
+  const deleteChatForMe = async (chatRoomId: string) => {
+    const prevChatRooms = chatRooms;
+    const wasSelected = String(selectedChatRoomRef.current?.chatRoomId || '') === String(chatRoomId);
+    setChatRooms((prev) => prev.filter((room) => String(room.chatRoomId) !== String(chatRoomId)));
+    setChatActionSheet(null);
+
+    if (wasSelected) {
+      setSelectedChatRoom(null);
+      selectedChatRoomRef.current = null;
+      setMessages([]);
+      setReplyTarget(null);
+      replyTargetLockRef.current = null;
+      if (isMobileView) setShowSidebarOnMobile(true);
+    }
+
+    try {
+      const token = localStorage.getItem('token');
+      const response = await fetch(`${API_URL}/api/messages/chats/${chatRoomId}/me`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (!response.ok) {
+        setChatRooms(prevChatRooms);
+        if (wasSelected && prevChatRooms.length > 0) {
+          const restored = prevChatRooms.find((room) => String(room.chatRoomId) === String(chatRoomId)) || null;
+          setSelectedChatRoom(restored);
+          selectedChatRoomRef.current = restored;
+          if (isMobileView) setShowSidebarOnMobile(false);
+        }
+      }
+    } catch (error) {
+      console.error('Delete chat failed:', error);
+      setChatRooms(prevChatRooms);
+      if (wasSelected && prevChatRooms.length > 0) {
+        const restored = prevChatRooms.find((room) => String(room.chatRoomId) === String(chatRoomId)) || null;
+        setSelectedChatRoom(restored);
+        selectedChatRoomRef.current = restored;
+        if (isMobileView) setShowSidebarOnMobile(false);
+      }
+    }
+  };
+
+  const copyMessageFromActionSheet = async () => {
+    if (!actionSheetMessage) return;
+    const textToCopy = String(actionSheetMessage.encryptedContent || '').trim();
+    if (!textToCopy) {
+      setActionSheet(null);
+      setFocusedMessageId(null);
+      return;
+    }
+
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(textToCopy);
+      } else {
+        const textarea = document.createElement('textarea');
+        textarea.value = textToCopy;
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.focus();
+        textarea.select();
+        document.execCommand('copy');
+        textarea.remove();
+      }
+    } catch (error) {
+      console.error('Copy message failed:', error);
+    } finally {
+      setActionSheet(null);
+      setFocusedMessageId(null);
+    }
+  };
+
+  const replyFromActionSheet = () => {
+    if (!actionSheetMessage) return;
+    prepareReplyFromMessage(actionSheetMessage);
+    setActionSheet(null);
+    setFocusedMessageId(null);
   };
 
   const deleteForEveryone = async () => {
@@ -1784,6 +1981,7 @@ const ChatPage = () => {
       console.error('Delete for everyone failed:', error);
     } finally {
       setActionSheet(null);
+      setFocusedMessageId(null);
     }
   };
 
@@ -1827,7 +2025,18 @@ const ChatPage = () => {
                   <div
                     key={room.chatRoomId}
                     className={`chat-list-item ${isSelected ? 'selected' : ''}`}
+                    onContextMenu={(e) => handleChatContextMenu(e, room.chatRoomId)}
+                    onPointerDown={(e) => startChatLongPress(e, room.chatRoomId)}
+                    onPointerUp={cancelChatLongPress}
+                    onPointerLeave={cancelChatLongPress}
+                    onPointerCancel={cancelChatLongPress}
+                    onPointerMove={moveChatLongPress}
                     onClick={() => {
+                      if (chatLongPressTriggeredRef.current) {
+                        chatLongPressTriggeredRef.current = false;
+                        return;
+                      }
+                      setChatActionSheet(null);
                       setSelectedChatRoom(room);
                       if (isMobileView) setShowSidebarOnMobile(false);
                     }}
@@ -2013,6 +2222,7 @@ const ChatPage = () => {
                                     : 'transform 0.2s ease-out'
                             }}
                             onContextMenu={(e) => handleMessageContextMenu(e, message, isOwnMessage)}
+                            onClick={(e) => handleMessageClick(e, message, isOwnMessage)}
                             onPointerDown={(e) => startMessageLongPress(e, message, isOwnMessage)}
                             onPointerUp={cancelMessageLongPress}
                             onPointerLeave={cancelMessageLongPress}
@@ -2079,6 +2289,16 @@ const ChatPage = () => {
                 })}
                 <div ref={messagesEndRef} />
               </div>
+              {showScrollToBottomButton && (
+                <button
+                  type="button"
+                  className="scroll-to-latest-btn"
+                  onClick={scrollToLatestMessage}
+                  aria-label="Scroll to latest messages"
+                >
+                  ↓
+                </button>
+              )}
 
               <div className="message-input-container">
                 {replyTarget && (
@@ -2207,7 +2427,7 @@ const ChatPage = () => {
         </div>
       </div>
 
-      {focusedMessageId && (
+      {(focusedMessageId || chatActionSheet) && (
         <div
           className="chat-focus-overlay"
           onPointerDown={(event) => {
@@ -2215,6 +2435,7 @@ const ChatPage = () => {
             event.stopPropagation();
             setFocusedMessageId(null);
             setActionSheet(null);
+            setChatActionSheet(null);
           }}
         />
       )}
@@ -2240,6 +2461,25 @@ const ChatPage = () => {
           style={{ left: `${actionSheet.x}px`, top: `${actionSheet.y}px` }}
           onClick={(e) => e.stopPropagation()}
         >
+          <button className="context-item" onClick={replyFromActionSheet}>
+            Reply
+          </button>
+          {actionSheetCanCopy && (
+            <button className="context-item" onClick={copyMessageFromActionSheet}>
+              Copy
+            </button>
+          )}
+          <button className="context-item" onClick={deleteForMe}>
+            Delete for me
+          </button>
+          {actionSheetCanDeleteForEveryone && (
+            <button
+              className="context-item danger"
+              onClick={deleteForEveryone}
+            >
+              Delete for everyone
+            </button>
+          )}
           <div className="reaction-row" role="group" aria-label="React to message">
             {MESSAGE_REACTION_OPTIONS.map((emoji) => (
               <button
@@ -2253,18 +2493,20 @@ const ChatPage = () => {
               </button>
             ))}
           </div>
-          {myReactionOnActionSheetMessage && (
-            <button className="context-item" onClick={(e) => removeReaction(actionSheet.messageId, e)}>
-              Remove my reaction
-            </button>
-          )}
-          {actionSheet.isOwn && (
-            <button className="context-item danger" onClick={deleteForEveryone}>
-              Delete for everyone
-            </button>
-          )}
-          <button className="context-item" onClick={deleteForMe}>
-            Delete for me
+        </div>
+      )}
+
+      {chatActionSheet && (
+        <div
+          className="message-action-sheet"
+          style={{ left: `${chatActionSheet.x}px`, top: `${chatActionSheet.y}px`, width: `${CHAT_ACTION_SHEET_WIDTH}px` }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button
+            className="context-item danger"
+            onClick={() => deleteChatForMe(chatActionSheet.chatRoomId)}
+          >
+            Delete chat
           </button>
         </div>
       )}

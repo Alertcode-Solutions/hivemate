@@ -60,7 +60,8 @@ export class ChatService {
    */
   static async getUserChatRooms(userId: string) {
     return await ChatRoom.find({
-      participants: userId
+      participants: userId,
+      hiddenForUsers: { $ne: userId }
     }).sort({ lastMessageAt: -1 });
   }
 
@@ -77,9 +78,15 @@ export class ChatService {
   /**
    * Update last message timestamp
    */
-  static async updateLastMessageTime(chatRoomId: string) {
-    await ChatRoom.findByIdAndUpdate(chatRoomId, {
+  static async updateLastMessageTime(chatRoomId: string, unhideUserIds: string[] = []) {
+    const update: any = {
       lastMessageAt: new Date()
-    });
+    };
+    if (unhideUserIds.length > 0) {
+      update.$pull = {
+        hiddenForUsers: { $in: unhideUserIds }
+      };
+    }
+    await ChatRoom.findByIdAndUpdate(chatRoomId, update);
   }
 }
