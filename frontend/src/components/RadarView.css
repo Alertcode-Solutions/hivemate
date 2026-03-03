@@ -2,7 +2,8 @@
   display: flex;
   flex-direction: column;
   gap: 0;
-  flex: 1;
+  flex: 0 0 auto;
+  overflow: visible;
 }
 
 /* Unified Container - All sections in one white card */
@@ -16,7 +17,7 @@
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  flex: 1;
+  flex: 0 0 auto;
 }
 
 /* Radar Controls */
@@ -166,6 +167,7 @@
   position: relative;
   overflow: hidden;
   width: 100%;
+  touch-action: pan-y;
 }
 
 .radar-canvas {
@@ -354,8 +356,8 @@
 .nearby-list {
   display: flex;
   flex-direction: column;
-  max-height: 280px;
-  overflow-y: auto;
+  max-height: none;
+  overflow: visible;
 }
 
 .nearby-row {
@@ -565,7 +567,7 @@
   }
 
   .nearby-list {
-    max-height: 320px;
+    max-height: none;
   }
 
   .nearby-row {

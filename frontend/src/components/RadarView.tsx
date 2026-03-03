@@ -36,6 +36,21 @@ interface SelectedRadarUser {
   photo?: string;
 }
 
+const RADAR_SCAN_CYCLE_MS = 700;
+const SCROLL_LOG_THROTTLE_MS = 180;
+
+const isScrollDebugEnabled = () => {
+  if (typeof window === 'undefined') return false;
+  try {
+    const forced = window.localStorage.getItem('debug-scroll');
+    if (forced === '1') return true;
+    if (forced === '0') return false;
+  } catch {
+    // ignore storage access issues
+  }
+  return false;
+};
+
 const RadarView = () => {
   const getStoredVisibilityMode = (): 'explore' | 'vanish' => {
     const savedMode = localStorage.getItem('radarVisibilityMode');
@@ -70,12 +85,116 @@ const RadarView = () => {
   const locationRequestInFlightRef = useRef(false);
   const syncInFlightRef = useRef(false);
   const lastServerSyncAtRef = useRef(0);
-  const touchStartRef = useRef<{ x: number; y: number; time: number } | null>(null);
-  const touchMovedRef = useRef(false);
-  const lastTouchHandledAtRef = useRef(0);
   const hasExploreBootstrappedRef = useRef(false);
+  const radarContainerRef = useRef<HTMLDivElement | null>(null);
+  const nearbyListRef = useRef<HTMLDivElement | null>(null);
+  const scrollDebugEnabledRef = useRef(isScrollDebugEnabled());
+  const lastScrollLogAtRef = useRef(0);
+  const lastInputLogAtRef = useRef(0);
+  const visibilityModeRef = useRef<'explore' | 'vanish'>(visibilityMode);
+  const distanceRangeRef = useRef(distanceRange);
+  const nearbyCountRef = useRef(nearbyUsers.length);
+  const filteredCountRef = useRef(filteredUsers.length);
 
   const API_URL = getApiBaseUrl();
+
+  const logRadarDebug = (label: string, extra: Record<string, unknown> = {}) => {
+    if (!scrollDebugEnabledRef.current || typeof window === 'undefined') return;
+    const html = document.documentElement;
+    const body = document.body;
+    const root = document.getElementById('root');
+    const scrollingEl = document.scrollingElement as HTMLElement | null;
+    console.log('[RadarView][ScrollDebug]', label, {
+      path: window.location.pathname,
+      mode: visibilityModeRef.current,
+      distanceRange: distanceRangeRef.current,
+      nearbyCount: nearbyCountRef.current,
+      filteredCount: filteredCountRef.current,
+      scrollY: window.scrollY,
+      scrollingElementTag: scrollingEl?.tagName || null,
+      scrollingElementScrollTop: scrollingEl?.scrollTop ?? null,
+      innerHeight: window.innerHeight,
+      htmlScrollHeight: html.scrollHeight,
+      bodyScrollHeight: body.scrollHeight,
+      rootScrollHeight: root?.scrollHeight,
+      htmlOverflowY: window.getComputedStyle(html).overflowY,
+      bodyOverflowY: window.getComputedStyle(body).overflowY,
+      rootOverflowY: root ? window.getComputedStyle(root).overflowY : null,
+      ...extra
+    });
+  };
+
+  const logRadarError = (
+    context: string,
+    error: unknown,
+    extra: Record<string, unknown> = {}
+  ) => {
+    const normalized =
+      error instanceof Error
+        ? {
+            name: error.name,
+            message: error.message,
+            stack: error.stack
+          }
+        : { message: String(error) };
+
+    console.error('[RadarView][Error]', {
+      context,
+      mode: visibilityModeRef.current,
+      distanceRange: distanceRangeRef.current,
+      nearbyCount: nearbyCountRef.current,
+      filteredCount: filteredCountRef.current,
+      ...normalized,
+      ...extra
+    });
+  };
+
+  const normalizeWheelDelta = (event: Pick<WheelEvent, 'deltaY' | 'deltaMode'>): number => {
+    if (event.deltaMode === 1) return event.deltaY * 16;
+    if (event.deltaMode === 2) return event.deltaY * window.innerHeight;
+    return event.deltaY;
+  };
+
+  const resolveScrollContainer = (): HTMLElement | null => {
+    const isVerticallyScrollable = (element: HTMLElement) => {
+      const overflowY = window.getComputedStyle(element).overflowY;
+      const allowsScroll =
+        overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay';
+      return allowsScroll && element.scrollHeight > element.clientHeight + 1;
+    };
+
+    const homeWrapper = document.querySelector('.home-screen-wrapper') as HTMLElement | null;
+    if (homeWrapper && isVerticallyScrollable(homeWrapper)) {
+      return homeWrapper;
+    }
+    return document.scrollingElement as HTMLElement | null;
+  };
+
+  const assistPageScrollFromWheel = (event: Pick<WheelEvent, 'deltaY' | 'deltaMode'>) => {
+    if (typeof document === 'undefined') return;
+    const scrollingEl = resolveScrollContainer();
+    if (!scrollingEl) return;
+
+    const rawDelta = normalizeWheelDelta(event);
+    if (!Number.isFinite(rawDelta) || rawDelta === 0) return;
+
+    const before = scrollingEl.scrollTop;
+    window.requestAnimationFrame(() => {
+      const after = scrollingEl.scrollTop;
+      const nativeMoved = Math.abs(after - before) > 0.5;
+      if (nativeMoved) return;
+
+      const boosted = Math.sign(rawDelta) * Math.max(Math.abs(rawDelta), 18);
+      scrollingEl.scrollTop = before + boosted;
+      logRadarDebug('wheel-scroll-assist', {
+        containerClass: scrollingEl.className || null,
+        rawDelta,
+        boosted,
+        before,
+        after
+      });
+    });
+  };
 
   const requestCurrentLocation = async (): Promise<{ lat: number; lng: number }> => {
     return new Promise((resolve, reject) => {
@@ -110,6 +229,175 @@ const RadarView = () => {
   }, [userLocation]);
 
   useEffect(() => {
+    visibilityModeRef.current = visibilityMode;
+  }, [visibilityMode]);
+
+  useEffect(() => {
+    distanceRangeRef.current = distanceRange;
+  }, [distanceRange]);
+
+  useEffect(() => {
+    nearbyCountRef.current = nearbyUsers.length;
+    filteredCountRef.current = filteredUsers.length;
+  }, [nearbyUsers.length, filteredUsers.length]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !scrollDebugEnabledRef.current) {
+      return () => undefined;
+    }
+
+    logRadarDebug('mount');
+
+    const onWindowScroll = () => {
+      const now = Date.now();
+      if (now - lastScrollLogAtRef.current < SCROLL_LOG_THROTTLE_MS) return;
+      lastScrollLogAtRef.current = now;
+      logRadarDebug('window-scroll');
+    };
+
+    const onWindowWheel = (event: WheelEvent) => {
+      const now = Date.now();
+      if (now - lastInputLogAtRef.current < SCROLL_LOG_THROTTLE_MS) return;
+      lastInputLogAtRef.current = now;
+      const target = event.target as HTMLElement | null;
+      logRadarDebug('window-wheel', {
+        deltaY: event.deltaY,
+        defaultPrevented: event.defaultPrevented,
+        targetTag: target?.tagName || null,
+        targetClass: target?.className || null
+      });
+    };
+
+    const onWindowTouchMove = (event: TouchEvent) => {
+      const now = Date.now();
+      if (now - lastInputLogAtRef.current < SCROLL_LOG_THROTTLE_MS) return;
+      lastInputLogAtRef.current = now;
+      const touch = event.touches?.[0];
+      const target = event.target as HTMLElement | null;
+      logRadarDebug('window-touchmove', {
+        touches: event.touches.length,
+        clientY: touch?.clientY ?? null,
+        defaultPrevented: event.defaultPrevented,
+        targetTag: target?.tagName || null,
+        targetClass: target?.className || null
+      });
+    };
+
+    const onDocumentWheelCapture = (event: WheelEvent) => {
+      const now = Date.now();
+      if (now - lastInputLogAtRef.current < SCROLL_LOG_THROTTLE_MS) return;
+      lastInputLogAtRef.current = now;
+      const target = event.target as HTMLElement | null;
+      logRadarDebug('document-wheel-capture', {
+        deltaY: event.deltaY,
+        defaultPrevented: event.defaultPrevented,
+        cancelable: event.cancelable,
+        targetTag: target?.tagName || null,
+        targetClass: target?.className || null
+      });
+    };
+
+    const onDocumentTouchMoveCapture = (event: TouchEvent) => {
+      const now = Date.now();
+      if (now - lastInputLogAtRef.current < SCROLL_LOG_THROTTLE_MS) return;
+      lastInputLogAtRef.current = now;
+      const touch = event.touches?.[0];
+      const target = event.target as HTMLElement | null;
+      logRadarDebug('document-touchmove-capture', {
+        touches: event.touches.length,
+        clientY: touch?.clientY ?? null,
+        defaultPrevented: event.defaultPrevented,
+        cancelable: event.cancelable,
+        targetTag: target?.tagName || null,
+        targetClass: target?.className || null
+      });
+    };
+
+    const onWindowError = (event: ErrorEvent) => {
+      console.error('[RadarView][WindowError]', {
+        message: event.message,
+        file: event.filename,
+        line: event.lineno,
+        column: event.colno,
+        error: event.error
+      });
+    };
+
+    const onUnhandledRejection = (event: PromiseRejectionEvent) => {
+      console.error('[RadarView][UnhandledRejection]', {
+        reason: event.reason
+      });
+    };
+
+    const radarContainer = radarContainerRef.current;
+    const nearbyList = nearbyListRef.current;
+
+    const onRadarContainerWheel = (event: WheelEvent) => {
+      assistPageScrollFromWheel(event);
+
+      const now = Date.now();
+      if (now - lastInputLogAtRef.current < SCROLL_LOG_THROTTLE_MS) return;
+      lastInputLogAtRef.current = now;
+      logRadarDebug('radar-container-wheel', {
+        deltaY: event.deltaY,
+        deltaMode: event.deltaMode,
+        defaultPrevented: event.defaultPrevented
+      });
+    };
+
+    const onRadarContainerTouchMove = (event: TouchEvent) => {
+      const now = Date.now();
+      if (now - lastInputLogAtRef.current < SCROLL_LOG_THROTTLE_MS) return;
+      lastInputLogAtRef.current = now;
+      const touch = event.touches?.[0];
+      logRadarDebug('radar-container-touchmove', {
+        touches: event.touches.length,
+        clientY: touch?.clientY ?? null,
+        defaultPrevented: event.defaultPrevented
+      });
+    };
+
+    const onNearbyListScroll = () => {
+      if (!nearbyList) return;
+      const now = Date.now();
+      if (now - lastScrollLogAtRef.current < SCROLL_LOG_THROTTLE_MS) return;
+      lastScrollLogAtRef.current = now;
+      logRadarDebug('nearby-list-scroll', {
+        nearbyScrollTop: nearbyList.scrollTop,
+        nearbyScrollHeight: nearbyList.scrollHeight,
+        nearbyClientHeight: nearbyList.clientHeight
+      });
+    };
+
+    window.addEventListener('scroll', onWindowScroll, { passive: true });
+    window.addEventListener('wheel', onWindowWheel, { passive: true });
+    window.addEventListener('touchmove', onWindowTouchMove, { passive: true });
+    window.addEventListener('error', onWindowError);
+    window.addEventListener('unhandledrejection', onUnhandledRejection);
+    document.addEventListener('wheel', onDocumentWheelCapture, { passive: true, capture: true });
+    document.addEventListener('touchmove', onDocumentTouchMoveCapture, { passive: true, capture: true });
+
+    radarContainer?.addEventListener('wheel', onRadarContainerWheel, { passive: true });
+    radarContainer?.addEventListener('touchmove', onRadarContainerTouchMove, { passive: true });
+    nearbyList?.addEventListener('scroll', onNearbyListScroll, { passive: true });
+
+    return () => {
+      window.removeEventListener('scroll', onWindowScroll);
+      window.removeEventListener('wheel', onWindowWheel);
+      window.removeEventListener('touchmove', onWindowTouchMove);
+      window.removeEventListener('error', onWindowError);
+      window.removeEventListener('unhandledrejection', onUnhandledRejection);
+      document.removeEventListener('wheel', onDocumentWheelCapture, { capture: true } as EventListenerOptions);
+      document.removeEventListener('touchmove', onDocumentTouchMoveCapture, { capture: true } as EventListenerOptions);
+
+      radarContainer?.removeEventListener('wheel', onRadarContainerWheel);
+      radarContainer?.removeEventListener('touchmove', onRadarContainerTouchMove);
+      nearbyList?.removeEventListener('scroll', onNearbyListScroll);
+      logRadarDebug('unmount');
+    };
+  }, []);
+
+  useEffect(() => {
     const syncVisibilityMode = async () => {
       try {
         const token = localStorage.getItem('token');
@@ -119,15 +407,15 @@ const RadarView = () => {
           headers: { Authorization: `Bearer ${token}` }
         });
 
-        if (!response.ok) return;
-        const data = await response.json();
-        if (data.mode === 'explore' || data.mode === 'vanish') {
-          setVisibilityMode(data.mode);
-        }
-      } catch (error) {
-        console.error('Failed to sync visibility mode:', error);
+      if (!response.ok) return;
+      const data = await response.json();
+      if (data.mode === 'explore' || data.mode === 'vanish') {
+        setVisibilityMode(data.mode);
       }
-    };
+    } catch (error) {
+      logRadarError('syncVisibilityMode', error);
+    }
+  };
 
     syncVisibilityMode();
   }, [API_URL]);
@@ -200,15 +488,15 @@ const RadarView = () => {
           ? { ...userLocationRef.current }
           : await requestLocationAccess();
         if (cancelled) return;
-        await updateLocationOnServer(freshLocation, 'explore');
-        lastServerSyncAtRef.current = Date.now();
-        await fetchNearbyUsers(freshLocation);
-      } catch (error) {
-        if (cancelled) return;
-        console.error('Failed to bootstrap explore mode:', error);
-        setLocationIssue('Location permission is required for Explore Mode.');
-        setNearbyUsers([]);
-      }
+      await updateLocationOnServer(freshLocation, 'explore');
+      lastServerSyncAtRef.current = Date.now();
+      await fetchNearbyUsers(freshLocation);
+    } catch (error) {
+      if (cancelled) return;
+      logRadarError('startExploreMode', error, { cancelled });
+      setLocationIssue('Location permission is required for Explore Mode.');
+      setNearbyUsers([]);
+    }
     };
 
     startExploreMode();
@@ -299,7 +587,11 @@ const RadarView = () => {
         setNearbyUsers(mappedUsers);
       }
     } catch (error) {
-      console.error('Failed to fetch nearby users:', error);
+      logRadarError('fetchNearbyUsers', error, {
+        lat: location?.lat,
+        lng: location?.lng,
+        silent: Boolean(options.silent)
+      });
     } finally {
       if (!options.silent) {
         setLoading(false);
@@ -337,7 +629,11 @@ const RadarView = () => {
         });
       }
     } catch (error) {
-      console.error('Failed to update location:', error);
+      logRadarError('updateLocationOnServer', error, {
+        lat: location?.lat,
+        lng: location?.lng,
+        mode
+      });
     }
   };
 
@@ -392,7 +688,7 @@ const RadarView = () => {
           socketRef.current.emit('visibility:toggle', { mode: 'vanish' });
         }
       } catch (error) {
-        console.error('Failed to toggle visibility:', error);
+        logRadarError('toggleVisibilityMode:vanish', error);
         setVisibilityMode(previousMode);
       }
       return;
@@ -429,7 +725,7 @@ const RadarView = () => {
       lastServerSyncAtRef.current = Date.now();
       await fetchNearbyUsers(freshLocation);
     } catch (error) {
-      console.error('Failed to toggle visibility:', error);
+      logRadarError('toggleVisibilityMode:explore', error);
       setVisibilityMode(previousMode);
       setLocationIssue('Location permission is required for Explore Mode.');
       if (previousMode === 'vanish') {
@@ -474,7 +770,7 @@ const RadarView = () => {
 
     // Draw scanning line with gradient
     const currentTime = Date.now();
-    const scanAngle = (currentTime / 30) % 360;
+    const scanAngle = ((currentTime % RADAR_SCAN_CYCLE_MS) / RADAR_SCAN_CYCLE_MS) * 360;
     const scanRad = (scanAngle * Math.PI) / 180;
     
     const gradient = ctx.createLinearGradient(
@@ -717,11 +1013,6 @@ const RadarView = () => {
   };
 
   const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    // Ignore synthetic click that follows a handled touch tap on mobile.
-    if (Date.now() - lastTouchHandledAtRef.current < 700) {
-      return;
-    }
-
     const canvas = canvasRef.current;
     if (!canvas) return;
 
@@ -774,6 +1065,12 @@ const RadarView = () => {
       return;
     }
 
+    logRadarDebug('canvas-pointerdown', {
+      pointerType: e.pointerType,
+      clientX: e.clientX,
+      clientY: e.clientY
+    });
+
     const coords = getCanvasCoordinates(e.clientX, e.clientY);
     if (!coords) return;
 
@@ -786,75 +1083,6 @@ const RadarView = () => {
         photo: tappedUser.photo
       });
     }
-  };
-
-  const handleCanvasTouchStart = (e: React.TouchEvent<HTMLCanvasElement>) => {
-    if (e.touches.length !== 1) {
-      touchStartRef.current = null;
-      touchMovedRef.current = false;
-      return;
-    }
-
-    const touch = e.touches[0];
-    const coords = getCanvasCoordinates(touch.clientX, touch.clientY);
-    if (!coords) return;
-
-    touchStartRef.current = {
-      x: coords.x,
-      y: coords.y,
-      time: Date.now()
-    };
-    touchMovedRef.current = false;
-  };
-
-  const handleCanvasTouchMove = (e: React.TouchEvent<HTMLCanvasElement>) => {
-    if (!touchStartRef.current || e.touches.length !== 1) return;
-
-    const touch = e.touches[0];
-    const coords = getCanvasCoordinates(touch.clientX, touch.clientY);
-    if (!coords) return;
-
-    const dx = coords.x - touchStartRef.current.x;
-    const dy = coords.y - touchStartRef.current.y;
-    if (Math.sqrt(dx * dx + dy * dy) > 12) {
-      touchMovedRef.current = true;
-    }
-  };
-
-  const handleCanvasTouchEnd = (e: React.TouchEvent<HTMLCanvasElement>) => {
-    if (!touchStartRef.current || touchMovedRef.current) {
-      touchStartRef.current = null;
-      touchMovedRef.current = false;
-      return;
-    }
-
-    const elapsed = Date.now() - touchStartRef.current.time;
-    if (elapsed > 450) {
-      touchStartRef.current = null;
-      touchMovedRef.current = false;
-      return;
-    }
-
-    const touch = e.changedTouches[0];
-    if (!touch) return;
-
-    const coords = getCanvasCoordinates(touch.clientX, touch.clientY);
-    if (!coords) return;
-
-    const hitRadius = 40;
-    const tappedUser = findUserAtPoint(coords.x, coords.y, hitRadius);
-    if (tappedUser) {
-      e.preventDefault();
-      lastTouchHandledAtRef.current = Date.now();
-      setSelectedUser({
-        userId: tappedUser.userId,
-        name: tappedUser.name,
-        photo: tappedUser.photo
-      });
-    }
-
-    touchStartRef.current = null;
-    touchMovedRef.current = false;
   };
 
   const handleCanvasMouseLeave = () => {
@@ -959,7 +1187,7 @@ const RadarView = () => {
         )}
 
         {/* Radar Canvas Section */}
-        <div className="radar-container">
+        <div className="radar-container" ref={radarContainerRef}>
           {visibilityMode === 'vanish' ? (
             <div className="vanish-message">
               <h3>You are in Vanish Mode</h3>
@@ -974,9 +1202,6 @@ const RadarView = () => {
                 onClick={handleCanvasClick}
                 onMouseMove={handleCanvasMouseMove}
                 onPointerDown={handleCanvasPointerDown}
-                onTouchStart={handleCanvasTouchStart}
-                onTouchMove={handleCanvasTouchMove}
-                onTouchEnd={handleCanvasTouchEnd}
                 onMouseLeave={handleCanvasMouseLeave}
                 className="radar-canvas"
               />
@@ -1023,7 +1248,7 @@ const RadarView = () => {
             {usersInRange.length === 0 ? (
               <div className="nearby-empty">No profiles within current filter and distance.</div>
             ) : (
-              <div className="nearby-list">
+              <div className="nearby-list" ref={nearbyListRef}>
                 {usersInRange.map((user) => {
                   const isFocused = focusedUserId === user.userId;
                   return (

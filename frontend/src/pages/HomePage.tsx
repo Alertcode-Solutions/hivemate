@@ -164,7 +164,7 @@ const HomePage = () => {
   };
 
   return (
-    <div className="homepage">
+    <div className="homepage home-screen-wrapper">
       <header className="homepage-header">
         <h1 className="app-name">
           Hive<span>Mate</span>

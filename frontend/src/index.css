@@ -2,39 +2,51 @@
   margin: 0;
   padding: 0;
   box-sizing: border-box;
-    -webkit-user-select: none;
-  -moz-user-select: none;    
+  -webkit-user-select: none;
+  -moz-user-select: none;
   -ms-user-select: none;
   user-select: none;
 }
-html, body {
-  /* 1. Allow vertical scrolling */
-  overflow-y: auto;
-  
-  /* 2. Stop the pull-to-refresh gesture & bounce */
+
+html,
+body {
   overscroll-behavior-y: none;
-  
-  /* 3. Ensure the body takes up full height */
-  height: 100%;
-}
-
-
-/* Remove scrollbar completely */
-::-webkit-scrollbar {
-  display: none;
-  width: 0;
-  height: 0;
-}
-
-* {
-  -ms-overflow-style: none;
-  scrollbar-width: none;
-}
-
-html, body {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  width: 100%;
   overflow-x: hidden;
   -ms-overflow-style: none;
   scrollbar-width: none;
+}
+
+html {
+  height: auto;
+  min-height: 100%;
+  overflow-y: auto;
+}
+
+body {
+  height: auto;
+  min-height: 100%;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.message-text {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+@media (max-width: 768px) {
+  .chat-pane.mobile-visible {
+    animation: slideInRight 0.3s cubic-bezier(0.25, 0.8, 0.25, 1) forwards;
+  }
+}
+
+@keyframes slideInRight {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
 }
 :root {
   --color-primary: #2563eb;
@@ -69,7 +81,21 @@ body {
 
 #root {
   width: 100%;
-  min-height: 100vh;
+  min-height: 100%;
+  overflow-x: hidden;
+  overflow-y: visible;
+  overscroll-behavior-y: none;
+}
+
+html.route-chat-lock,
+body.route-chat-lock {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
 }
 
 h1 {

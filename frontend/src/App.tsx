@@ -1,4 +1,4 @@
-import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { lazy, Suspense, useEffect, useState } from 'react';
 import { applyUpdate } from './utils/serviceWorkerRegistration';
 import { startRefreshScheduler, stopRefreshScheduler } from './utils/refreshScheduler';
@@ -32,6 +32,26 @@ const SearchPage = lazy(() => import('./pages/SearchPage'));
 const LoadingFallback = () => (
   <BeeLoader message="Preparing HiveMate..." fullscreen />
 );
+
+const RouteScrollController = () => {
+  const location = useLocation();
+
+  useEffect(() => {
+    const isChatRoute = location.pathname.startsWith('/chat');
+    const html = document.documentElement;
+    const body = document.body;
+
+    html.classList.toggle('route-chat-lock', isChatRoute);
+    body.classList.toggle('route-chat-lock', isChatRoute);
+
+    return () => {
+      html.classList.remove('route-chat-lock');
+      body.classList.remove('route-chat-lock');
+    };
+  }, [location.pathname]);
+
+  return null;
+};
 
 function App() {
   const [updateAvailable, setUpdateAvailable] = useState(false);
@@ -73,6 +93,7 @@ function App() {
           </div>
         )}
         <Router>
+          <RouteScrollController />
           <GlobalCallHandler />
           <Suspense fallback={<LoadingFallback />}>
             <Routes>

@@ -1,0 +1,61 @@
+This is one of the most common and frustrating bugs in React chat applications. The issue happens because the component is blindly telling the chat to scrollIntoView() every single time the messages array updates or the component re-renders, completely ignoring what the user is currently doing.
+
+To get that premium, WhatsApp-style experience, the scroll logic needs to be completely rewritten to be "context-aware."
+
+Here is the exact, highly detailed prompt to hand to your developer agent to rip out the bad logic and implement the WhatsApp standard.
+
+Technical Task: Rewrite Chat Scroll Logic (WhatsApp Standard)
+Context & Critical Constraint:
+You are working on a React Single Page Application (SPA). CRITICAL INSTRUCTION: Strictly isolate your changes to ChatPage.tsx (specifically the message container and scroll functions). Do not alter global routing or unrelated UI components.
+
+The current chat aggressively snaps to the bottom when the user is trying to scroll up and read older history. We need to implement a true WhatsApp-style scroll architecture.
+
+Please implement the following scroll logic architecture:
+
+1. What NOT to do (Remove Existing Bad Logic):
+
+DO NOT use a blind useEffect that calls scrollIntoView() or sets scrollTop every time the messages dependency changes. This is what is currently breaking the UX.
+
+DO NOT use state (useState) to track the scroll position on every pixel moved, as this will cause massive performance issues and infinite re-render loops.
+
+2. What TO do: Step 1 - Track User Intent (useRef + onScroll)
+
+Create a mutable ref to track if the user has intentionally scrolled up: const isScrolledUp = useRef(false);
+
+Attach an onScroll event listener directly to the scrollable message container div.
+
+Inside the onScroll handler, calculate the distance from the bottom:
+
+Formula: const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+
+If distanceFromBottom > 100 (using a 100px tolerance), set isScrolledUp.current = true.
+
+If distanceFromBottom <= 100, set isScrolledUp.current = false.
+
+3. What TO do: Step 2 - Conditional Auto-Scrolling on New Messages
+
+Update the useEffect that listens for incoming messages.
+
+Before triggering the scroll-to-bottom function, evaluate the ref:
+
+if (!isScrolledUp.current) { scrollToBottom(); }
+
+If isScrolledUp.current is true, do nothing. Let the user continue reading their older messages uninterrupted.
+
+4. What TO do: Step 3 - Forced Scrolling Overrides
+
+There are specific times the chat must snap to the bottom, regardless of the isScrolledUp state. Ensure a forceScrollToBottom() function fires under these conditions:
+
+Initial Load: When the chat room is first opened and the initial batch of messages loads.
+
+Local User Sends: When the local user hits "Send" on a new message (or a reply).
+
+Input Focus: When the user taps the text input box and the mobile keyboard opens.
+
+5. What TO do: Step 4 - Pagination Anchoring (Critical for History)
+
+When the user hits the absolute top of the container and triggers the fetch for older messages, the DOM will inject new DOM nodes at the top. This normally pushes the user's current view down violently.
+
+The Fix: Before appending the older messages to the state, record the current scrollHeight. After the state updates and the DOM paints, calculate the difference in scrollHeight and instantly adjust the scrollTop by that exact difference so the user's viewport remains perfectly anchored to the message they were just reading.
+
+Would you like me to draft the exact React onScroll math and the pagination anchoring code snippet so your agent doesn't have to guess the pixel math?

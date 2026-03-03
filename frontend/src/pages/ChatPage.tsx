@@ -51,7 +51,7 @@ const MESSAGE_REACTION_OPTIONS = ['\u{1F44D}', '\u{2764}\u{FE0F}', '\u{1F602}', 
 const QUICK_EMOJIS = ['\u{1F600}', '\u{1F602}', '\u{1F60D}', '\u{1F44D}', '\u{1F389}', '\u{1F525}', '\u{1F64F}', '\u{2764}\u{FE0F}'];
 const ACTION_SHEET_WIDTH = 264;
 const ACTION_SHEET_MARGIN = 10;
-const SWIPE_REPLY_THRESHOLD = 54;
+const SWIPE_REPLY_THRESHOLD = 40;
 const MAX_SWIPE_DISTANCE = 60;
 const PREVIEW_REPLY_CHARS = 90;
 const AUTO_SCROLL_BOTTOM_EPSILON = 100;
@@ -167,7 +167,7 @@ const ChatPage = () => {
   const [replyTarget, setReplyTarget] = useState<ReplyTarget | null>(null);
   const [swipeOffsets, setSwipeOffsets] = useState<Record<string, number>>({});
   const [swipingMessageId, setSwipingMessageId] = useState<string | null>(null);
-  const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
+  const [focusedMessageId, setFocusedMessageId] = useState<string | null>(null);
   const [peerOnline, setPeerOnline] = useState(false);
   const [peerLastSeen, setPeerLastSeen] = useState<string>('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -182,6 +182,8 @@ const ChatPage = () => {
   const longPressMovedRef = useRef(false);
   const activePointerIdRef = useRef<number | null>(null);
   const isAtBottomRef = useRef(true);
+  const isUserScrollingRef = useRef(false);
+  const userScrollIdleTimerRef = useRef<number | null>(null);
   const forceScrollToBottomRef = useRef(false);
   const initialScrollDoneRef = useRef<string>('');
   const swipeStartRef = useRef<{ id: string; x: number; y: number } | null>(null);
@@ -191,6 +193,16 @@ const ChatPage = () => {
   const keyboardHoldOffsetRef = useRef(0);
   const keyboardVisibleRef = useRef(false);
   const inputFocusedRef = useRef(false);
+  const replyTargetLockRef = useRef<ReplyTarget | null>(null);
+  const previousScrollMetricsRef = useRef<{
+    scrollHeight: number;
+    scrollTop: number;
+    messageCount: number;
+    firstMessageId: string;
+    lastMessageId: string;
+    wasAtBottom: boolean;
+    lastSenderId: string;
+  } | null>(null);
 
   const API_URL = getApiBaseUrl();
   const currentUserId = localStorage.getItem('userId');
@@ -248,6 +260,29 @@ const ChatPage = () => {
     if (!viewport) return 0;
     return Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop);
   };
+
+  const triggerHaptic = (pattern: number | number[] = 50) => {
+    try {
+      if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
+        (navigator as any).vibrate(pattern);
+      }
+    } catch {
+      // ignore haptic failures
+    }
+  };
+
+  const clearNativeAppBadge = async () => {
+    try {
+      if (typeof navigator === 'undefined') return;
+      if ('clearAppBadge' in navigator) {
+        await (navigator as any).clearAppBadge();
+      } else if ('setAppBadge' in navigator) {
+        await (navigator as any).setAppBadge(0);
+      }
+    } catch {
+      // ignore badging failures
+    }
+  };
   const upsertMessagesById = (incoming: Message[]) => {
     const byId = new Map<string, Message>();
     for (const message of incoming) {
@@ -279,6 +314,20 @@ const ChatPage = () => {
     const { scrollTop, scrollHeight, clientHeight } = event.currentTarget;
     const distanceToBottom = scrollHeight - scrollTop - clientHeight;
     isAtBottomRef.current = distanceToBottom <= AUTO_SCROLL_BOTTOM_EPSILON;
+    if (focusedMessageId) {
+      setFocusedMessageId(null);
+    }
+  };
+
+  const markUserScrolling = () => {
+    isUserScrollingRef.current = true;
+    if (userScrollIdleTimerRef.current !== null) {
+      window.clearTimeout(userScrollIdleTimerRef.current);
+    }
+    userScrollIdleTimerRef.current = window.setTimeout(() => {
+      isUserScrollingRef.current = false;
+      userScrollIdleTimerRef.current = null;
+    }, 2000);
   };
 
   const toReadableTimestamp = (value?: string | Date | null) => {
@@ -326,6 +375,7 @@ const ChatPage = () => {
       isAtBottomRef.current = true;
       initialScrollDoneRef.current = '';
       setReplyTarget(null);
+      replyTargetLockRef.current = null;
       setReactionSheetMessageId(null);
       loadMessages(selectedChatRoom.chatRoomId);
     }
@@ -566,26 +616,50 @@ const ChatPage = () => {
     };
   }, [isMobileView, showEmojiPicker]);
 
-  useEffect(() => {
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
-    return () => {
-      document.body.style.overflow = previousOverflow;
-    };
-  }, []);
+  useLayoutEffect(() => {
+    const container = messagesContainerRef.current;
+    if (!container) return;
 
-  useEffect(() => {
-    if (!messages.length) return;
-    if (forceScrollToBottomRef.current) {
-      scrollToBottom();
-      forceScrollToBottomRef.current = false;
-      isAtBottomRef.current = true;
-      return;
+    const firstMessageId = messages.length ? normalizeId(messages[0].id) : '';
+    const lastMessageId = messages.length ? normalizeId(messages[messages.length - 1].id) : '';
+    const lastSenderId = messages.length ? normalizeId(messages[messages.length - 1].senderId) : '';
+    const previous = previousScrollMetricsRef.current;
+
+    if (previous && messages.length > previous.messageCount) {
+      const prependedHistory =
+        firstMessageId !== previous.firstMessageId && lastMessageId === previous.lastMessageId;
+      const appendedNewest = lastMessageId !== previous.lastMessageId;
+      const lastMessageByMe = appendedNewest && lastSenderId === currentUserIdStr;
+
+      if (prependedHistory) {
+        const heightDelta = container.scrollHeight - previous.scrollHeight;
+        if (heightDelta > 0) {
+          container.scrollTop = previous.scrollTop + heightDelta;
+        }
+      } else if (
+        forceScrollToBottomRef.current ||
+        (isAtBottomRef.current && !isUserScrollingRef.current) ||
+        lastMessageByMe
+      ) {
+        container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
+      }
+    } else if (forceScrollToBottomRef.current) {
+      container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
     }
-    if (isAtBottomRef.current) {
-      scrollToBottom();
-      isAtBottomRef.current = true;
-    }
+
+    forceScrollToBottomRef.current = false;
+    isAtBottomRef.current =
+      container.scrollHeight - container.scrollTop - container.clientHeight <= AUTO_SCROLL_BOTTOM_EPSILON;
+
+    previousScrollMetricsRef.current = {
+      scrollHeight: container.scrollHeight,
+      scrollTop: container.scrollTop,
+      messageCount: messages.length,
+      firstMessageId,
+      lastMessageId,
+      wasAtBottom: isAtBottomRef.current,
+      lastSenderId
+    };
   }, [messages]);
 
   useEffect(() => {
@@ -597,6 +671,10 @@ const ChatPage = () => {
       if (highlightTimerRef.current !== null) {
         window.clearTimeout(highlightTimerRef.current);
         highlightTimerRef.current = null;
+      }
+      if (userScrollIdleTimerRef.current !== null) {
+        window.clearTimeout(userScrollIdleTimerRef.current);
+        userScrollIdleTimerRef.current = null;
       }
     };
   }, []);
@@ -952,24 +1030,11 @@ const ChatPage = () => {
         );
         const normalizedRoomId = normalizeId(chatRoomId);
         const isFirstLoadForRoom = initialScrollDoneRef.current !== normalizedRoomId;
-        const container = messagesContainerRef.current;
-        const previousScrollHeight = container?.scrollHeight || 0;
-        const previousScrollTop = container?.scrollTop || 0;
         if (isFirstLoadForRoom) {
           forceScrollToBottomRef.current = true;
           isAtBottomRef.current = true;
         }
         setMessages(upsertMessagesById(decryptedMessages));
-        if (!isFirstLoadForRoom && previousScrollTop <= 1) {
-          requestAnimationFrame(() => {
-            const currentContainer = messagesContainerRef.current;
-            if (!currentContainer) return;
-            const heightDelta = currentContainer.scrollHeight - previousScrollHeight;
-            if (heightDelta > 0) {
-              currentContainer.scrollTop = heightDelta;
-            }
-          });
-        }
         if (isFirstLoadForRoom) {
           initialScrollDoneRef.current = normalizedRoomId;
         }
@@ -980,6 +1045,7 @@ const ChatPage = () => {
               : room
           )
         );
+        void clearNativeAppBadge();
       }
     } catch (error) {
       console.error('Failed to load messages:', error);
@@ -991,6 +1057,7 @@ const ChatPage = () => {
     if (!sanitizedMessage || !selectedChatRoom || sending || !encryptionReady) return;
     const replyContext = replyTarget;
 
+    triggerHaptic(50);
     setSending(true);
     try {
       const token = localStorage.getItem('token');
@@ -1062,11 +1129,15 @@ const ChatPage = () => {
         appendMessageDedup(newMessage);
         setMessageInput('');
         setReplyTarget(null);
+        replyTargetLockRef.current = null;
         setShowEmojiPicker(false);
         setActionSheet(null);
         if (messageInputRef.current) {
           messageInputRef.current.style.height = 'auto';
           messageInputRef.current.focus();
+          window.requestAnimationFrame(() => {
+            messageInputRef.current?.focus();
+          });
         }
         emitTypingState(false);
         if (typingStopTimeoutRef.current) {
@@ -1120,6 +1191,7 @@ const ChatPage = () => {
   };
 
   const reactToMessage = async (messageId: string, emoji: string) => {
+    triggerHaptic([30, 50, 30]);
     try {
       const token = localStorage.getItem('token');
       const response = await fetch(`${API_URL}/api/messages/${messageId}/reaction`, {
@@ -1157,6 +1229,7 @@ const ChatPage = () => {
 
   const removeReaction = async (messageId: string, event?: React.MouseEvent<HTMLButtonElement>) => {
     event?.stopPropagation();
+    triggerHaptic([30, 50, 30]);
     const snapshot = messages;
     setMessages((prev) =>
       prev.map((message) =>
@@ -1326,6 +1399,9 @@ const ChatPage = () => {
 
   const handleMessageInputChange = (value: string) => {
     setMessageInput(value);
+    if (!replyTarget && replyTargetLockRef.current) {
+      setReplyTarget(replyTargetLockRef.current);
+    }
     if (messageInputRef.current) {
       messageInputRef.current.style.height = 'auto';
       const nextHeight = Math.min(messageInputRef.current.scrollHeight, 120);
@@ -1359,6 +1435,22 @@ const ChatPage = () => {
     forceScrollToBottomRef.current = true;
     isAtBottomRef.current = true;
     requestAnimationFrame(() => scrollToBottom());
+  };
+
+  const handleChatContainerPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (sending) return;
+    const target = event.target as Element | null;
+    if (!target || !messageInputRef.current) return;
+
+    const keepKeyboardOpen =
+      Boolean(target.closest('.message-input')) ||
+      Boolean(target.closest('.send-button')) ||
+      Boolean(target.closest('.emoji-toggle-btn')) ||
+      Boolean(target.closest('.emoji-picker-panel')) ||
+      Boolean(target.closest('.attachment-button'));
+
+    if (keepKeyboardOpen) return;
+    messageInputRef.current.blur();
   };
 
   const formatTime = (date: Date) => {
@@ -1513,6 +1605,8 @@ const ChatPage = () => {
   ) => {
     event.preventDefault();
     event.stopPropagation();
+    const messageId = normalizeId(message.id);
+    setFocusedMessageId(messageId);
     const rect = (event.currentTarget as HTMLDivElement).getBoundingClientRect();
     openActionSheetFromRect(rect, message, isOwnMessage);
   };
@@ -1527,10 +1621,13 @@ const ChatPage = () => {
     activePointerIdRef.current = event.pointerId;
     const target = event.currentTarget;
     longPressTimerRef.current = window.setTimeout(() => {
+      longPressTimerRef.current = null;
       if (longPressMovedRef.current) return;
+      const messageId = normalizeId(message.id);
+      setFocusedMessageId(messageId);
       const rect = target.getBoundingClientRect();
       openActionSheetFromRect(rect, message, isOwnMessage);
-    }, 360);
+    }, 500);
   };
 
   const cancelMessageLongPress = () => {
@@ -1565,8 +1662,7 @@ const ChatPage = () => {
 
   const moveSwipeReply = (
     event: React.TouchEvent<HTMLDivElement>,
-    message: Message,
-    isOwnMessage: boolean
+    message: Message
   ) => {
     const activeSwipe = swipeStartRef.current;
     const messageId = normalizeId(message.id);
@@ -1578,19 +1674,17 @@ const ChatPage = () => {
     const diffY = touch.clientY - activeSwipe.y;
     if (Math.abs(diffY) > 42) return;
 
-    let nextOffset = 0;
-    if (isOwnMessage) {
-      nextOffset = Math.max(-MAX_SWIPE_DISTANCE, Math.min(0, diffX));
-    } else {
-      nextOffset = Math.max(0, Math.min(MAX_SWIPE_DISTANCE, diffX));
+    if (diffX < 0) {
+      setSwipeOffsets((prev) => ({ ...prev, [messageId]: 0 }));
+      return;
     }
+    const nextOffset = Math.max(0, Math.min(MAX_SWIPE_DISTANCE, diffX));
     setSwipeOffsets((prev) => ({ ...prev, [messageId]: nextOffset }));
   };
 
   const endSwipeReply = (
     event: React.TouchEvent<HTMLDivElement>,
-    message: Message,
-    isOwnMessage: boolean
+    message: Message
   ) => {
     const messageId = normalizeId(message.id);
     if (!swipeStartRef.current || swipeStartRef.current.id !== messageId) return;
@@ -1609,8 +1703,7 @@ const ChatPage = () => {
     setSwipeOffsets((prev) => ({ ...prev, [messageId]: 0 }));
 
     if (Math.abs(diffY) > 42) return;
-    if (!isOwnMessage && diffX < SWIPE_REPLY_THRESHOLD) return;
-    if (isOwnMessage && diffX > -SWIPE_REPLY_THRESHOLD) return;
+    if (diffX < SWIPE_REPLY_THRESHOLD) return;
 
     const senderName = normalizeId(message.senderId) === currentUserIdStr ? 'You' : getParticipantName(String(message.senderId));
     const safeText = String(message.encryptedContent || '').replace(/\s+/g, ' ').trim().slice(0, PREVIEW_REPLY_CHARS);
@@ -1621,26 +1714,32 @@ const ChatPage = () => {
       text: safeText,
       isOwn: normalizeId(message.senderId) === currentUserIdStr
     });
+    replyTargetLockRef.current = {
+      messageId,
+      senderId: normalizeId(message.senderId),
+      senderName,
+      text: safeText,
+      isOwn: normalizeId(message.senderId) === currentUserIdStr
+    };
+    triggerHaptic([30, 50, 30]);
     messageInputRef.current?.focus();
   };
 
   const scrollToQuotedMessage = (replyToMessageId?: string | null) => {
     const targetId = normalizeId(replyToMessageId);
     if (!targetId) return;
-    const targetElement = document.getElementById(`message-${targetId}`);
-    if (!targetElement) return;
+    const targetRow = document.getElementById(`message-${targetId}`);
+    if (!targetRow) return;
 
-    targetElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    targetElement.classList.remove('message-row-highlight');
-    void targetElement.offsetWidth;
-    targetElement.classList.add('message-row-highlight');
-    setHighlightedMessageId(null);
+    targetRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    targetRow.classList.remove('message-row-highlight');
+    void targetRow.offsetWidth;
+    targetRow.classList.add('message-row-highlight');
     if (highlightTimerRef.current !== null) {
       window.clearTimeout(highlightTimerRef.current);
     }
     highlightTimerRef.current = window.setTimeout(() => {
-      targetElement.classList.remove('message-row-highlight');
-      setHighlightedMessageId(null);
+      targetRow.classList.remove('message-row-highlight');
     }, 1500);
   };
 
@@ -1693,7 +1792,7 @@ const ChatPage = () => {
   }
 
   return (
-    <div className="chat-page">
+    <div className="chat-page" onPointerDown={handleChatContainerPointerDown}>
       <div className="chat-container">
         {/* Chat List Sidebar */}
         <div className={`chat-list-sidebar ${isMobileView && showSidebarOnMobile ? 'mobile-visible' : ''}`}>
@@ -1785,7 +1884,7 @@ const ChatPage = () => {
         </div>
 
         {/* Chat Window */}
-        <div className={`chat-window ${isMobileView && showSidebarOnMobile ? 'mobile-hidden' : ''}`}>
+        <div className={`chat-window chat-pane ${isMobileView && showSidebarOnMobile ? 'mobile-hidden' : ''} ${isMobileView && !showSidebarOnMobile ? 'mobile-visible' : ''}`}>
           {selectedChatRoom ? (
             <>
               <div className="chat-window-header">
@@ -1816,16 +1915,17 @@ const ChatPage = () => {
                     )}
                     <span className="chat-header-info">
                       <span className="chat-header-name">
-                        {selectedChatRoom.participants
-                          .filter(p => String(p.userId) !== currentUserIdStr)
-                          .map(p => p.name)
-                          .join(', ')}
+                        <span className="chat-header-name-text">
+                          {selectedChatRoom.participants
+                            .filter(p => String(p.userId) !== currentUserIdStr)
+                            .map(p => p.name)
+                            .join(', ')}
+                        </span>
+                        <span className="chat-header-lock-inline" aria-hidden="true">
+                          <LockIcon />
+                        </span>
                       </span>
                       <span className="chat-header-subline">
-                        <span className="encryption-indicator">
-                          <span className="lock-icon"><LockIcon /></span>
-                          <span>End-to-end encrypted</span>
-                        </span>
                         {activeMatchBadge && <span className="typing-indicator">{`Matched \u{1F496}`}</span>}
                       </span>
                       <span className={`typing-indicator ${isPeerTyping ? 'typing-live' : ''}`}>
@@ -1854,38 +1954,63 @@ const ChatPage = () => {
                 </div>
               </div>
 
-              <div className="messages-container" ref={messagesContainerRef} onScroll={handleMessagesScroll}>
+              <div
+                className="messages-container"
+                ref={messagesContainerRef}
+                onScroll={handleMessagesScroll}
+                onWheel={markUserScrolling}
+                onTouchMove={markUserScrolling}
+              >
                 {messages.map((message, index) => {
                   const isOwnMessage = String(message.senderId) === currentUserIdStr;
+                  const previousMessage = index > 0 ? messages[index - 1] : null;
+                  const startsNewSenderGroup =
+                    Boolean(previousMessage) &&
+                    String(previousMessage?.senderId) !== String(message.senderId);
                   const showDate = index === 0 || 
                     formatDate(new Date(messages[index - 1].timestamp)) !== 
                     formatDate(new Date(message.timestamp));
                   const replyPreview = message.deletedForEveryone ? null : getReplyPreviewForMessage(message);
+                  const normalizedMessageId = normalizeId(message.id);
+                  const swipeOffset = swipeOffsets[normalizedMessageId] || 0;
+                  const isFocused = focusedMessageId === normalizedMessageId;
 
                   return (
                     <div
                       key={message.id}
-                      id={`message-${normalizeId(message.id)}`}
-                      className={highlightedMessageId === normalizeId(message.id) ? 'message-row message-row-highlight' : 'message-row'}
+                      id={`message-${normalizedMessageId}`}
+                      className={`message-row ${isFocused ? 'is-focused-row' : ''}`}
+                      onTouchStart={(e) => startSwipeReply(e, message)}
+                      onTouchMove={(e) => moveSwipeReply(e, message)}
+                      onTouchEnd={(e) => endSwipeReply(e, message)}
+                      onTouchCancel={(e) => endSwipeReply(e, message)}
                     >
                       {showDate && (
                         <div className="message-date-divider">
                           {formatDate(new Date(message.timestamp))}
                         </div>
                       )}
-                      <div className={`message ${isOwnMessage ? 'own' : 'other'}`}>
+                      <div className={`message message-wrapper ${isOwnMessage ? 'own message-sent' : 'other message-received'} ${startsNewSenderGroup ? 'group-break' : ''}`}>
                         <div className="message-swipe-shell">
-                          <span className="message-reply-indicator" aria-hidden="true">
-                            ↩
+                          <span
+                            className="reply-icon-container"
+                            style={{ opacity: Math.min(1, swipeOffset / 22) }}
+                            aria-hidden="true"
+                          >
+                            <span className="message-reply-indicator" aria-hidden="true">
+                              ↩
+                            </span>
                           </span>
                           <div
-                            className={`message-content ${message.deletedForEveryone ? 'deleted' : ''}`}
+                            className={`message-content message-bubble ${message.deletedForEveryone ? 'deleted' : ''} ${isFocused ? 'is-focused' : ''}`}
                             style={{
-                              transform: `translateX(${swipeOffsets[normalizeId(message.id)] || 0}px)`,
+                              transform: `translateX(${swipeOffset}px) scale(${isFocused ? 1.03 : 1})`,
                               transition:
-                                swipingMessageId === normalizeId(message.id)
+                                swipingMessageId === normalizedMessageId
                                   ? 'none'
-                                  : 'transform 0.2s ease-out'
+                                  : isFocused
+                                    ? 'transform 0.2s cubic-bezier(0.33, 1, 0.68, 1)'
+                                    : 'transform 0.2s ease-out'
                             }}
                             onContextMenu={(e) => handleMessageContextMenu(e, message, isOwnMessage)}
                             onPointerDown={(e) => startMessageLongPress(e, message, isOwnMessage)}
@@ -1893,10 +2018,6 @@ const ChatPage = () => {
                             onPointerLeave={cancelMessageLongPress}
                             onPointerCancel={cancelMessageLongPress}
                             onPointerMove={moveMessageLongPress}
-                            onTouchStart={(e) => startSwipeReply(e, message)}
-                            onTouchMove={(e) => moveSwipeReply(e, message, isOwnMessage)}
-                            onTouchEnd={(e) => endSwipeReply(e, message, isOwnMessage)}
-                            onTouchCancel={(e) => endSwipeReply(e, message, isOwnMessage)}
                           >
                             {replyPreview && (
                               <div
@@ -1918,7 +2039,20 @@ const ChatPage = () => {
                                 <span className="message-quote-text">{replyPreview.text}</span>
                               </div>
                             )}
-                            {renderMessageContent(message.encryptedContent)}
+                            <span className="message-text">{renderMessageContent(message.encryptedContent)}</span>
+                            <div className="message-meta internal-meta">
+                              <span className="message-time">
+                                {formatTime(message.timestamp)}
+                              </span>
+                              {isOwnMessage && (
+                                <span
+                                  className={`message-status ${message.read ? 'read' : message.delivered ? 'delivered' : 'sent'}`}
+                                  aria-label={message.read ? 'Read' : message.delivered ? 'Delivered' : 'Sent'}
+                                >
+                                  <MessageStatusTicks status={message.read ? 'read' : message.delivered ? 'delivered' : 'sent'} />
+                                </span>
+                              )}
+                            </div>
                           </div>
                         </div>
                         {Array.isArray(message.reactions) && message.reactions.length > 0 && (
@@ -1939,19 +2073,6 @@ const ChatPage = () => {
                             ))}
                           </div>
                         )}
-                        <div className="message-meta">
-                          <span className="message-time">
-                            {formatTime(message.timestamp)}
-                          </span>
-                          {isOwnMessage && (
-                            <span
-                              className={`message-status ${message.read ? 'read' : message.delivered ? 'delivered' : 'sent'}`}
-                              aria-label={message.read ? 'Read' : message.delivered ? 'Delivered' : 'Sent'}
-                            >
-                              <MessageStatusTicks status={message.read ? 'read' : message.delivered ? 'delivered' : 'sent'} />
-                            </span>
-                          )}
-                        </div>
                       </div>
                     </div>
                   );
@@ -1973,7 +2094,10 @@ const ChatPage = () => {
                     <button
                       type="button"
                       className="reply-preview-close"
-                      onClick={() => setReplyTarget(null)}
+                      onClick={() => {
+                        replyTargetLockRef.current = null;
+                        setReplyTarget(null);
+                      }}
                       aria-label="Cancel reply"
                     >
                       ×
@@ -1983,8 +2107,10 @@ const ChatPage = () => {
                 <button
                   type="button"
                   className="emoji-toggle-btn"
-                  onMouseDown={(e) => e.preventDefault()}
-                  onTouchStart={(e) => e.preventDefault()}
+                  onPointerDown={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                  }}
                   onClick={(e) => {
                     e.stopPropagation();
                     setShowEmojiPicker((prev) => {
@@ -2056,17 +2182,20 @@ const ChatPage = () => {
                   onKeyDown={handleKeyPress}
                   onPaste={handleInputPaste}
                   rows={1}
-                  disabled={sending}
+                  readOnly={sending}
                 />
                 <button
                   type="button"
                   className="send-button"
-                  onMouseDown={(e) => e.preventDefault()}
-                  onTouchStart={(e) => e.preventDefault()}
+                  onPointerDown={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                  }}
                   onClick={sendMessage}
                   disabled={!messageInput.trim() || sending}
+                  style={{ opacity: sending ? 0.6 : 1 }}
                 >
-                  {sending ? '...' : 'Send'}
+                  Send
                 </button>
               </div>
             </>
@@ -2077,6 +2206,18 @@ const ChatPage = () => {
           )}
         </div>
       </div>
+
+      {focusedMessageId && (
+        <div
+          className="chat-focus-overlay"
+          onPointerDown={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            setFocusedMessageId(null);
+            setActionSheet(null);
+          }}
+        />
+      )}
 
       {/* Call Modal */}
       {showCallModal && currentCall && (

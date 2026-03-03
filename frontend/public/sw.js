@@ -180,6 +180,29 @@ self.addEventListener('push', (event) => {
     ]
   };
 
+  const unreadCount = Math.max(
+    0,
+    Number(
+      payload.unreadCount ||
+      payloadData.unreadCount ||
+      payload.badgeCount ||
+      payloadData.badgeCount ||
+      1
+    )
+  );
+
+  const badgePromise = (async () => {
+    try {
+      if (self.registration && 'setAppBadge' in self.registration) {
+        await self.registration.setAppBadge(unreadCount);
+      } else if (typeof navigator !== 'undefined' && 'setAppBadge' in navigator) {
+        await navigator.setAppBadge(unreadCount);
+      }
+    } catch (badgeError) {
+      console.error('[SW] setAppBadge failed:', badgeError);
+    }
+  })();
+
   const notificationPromise = self.registration
     .showNotification(title, options)
     .then(() => {
@@ -189,7 +212,7 @@ self.addEventListener('push', (event) => {
       console.error('[SW] showNotification FATAL ERROR:', err);
     });
 
-  event.waitUntil(notificationPromise);
+  event.waitUntil(Promise.all([badgePromise, notificationPromise]));
 });
 
 self.addEventListener('notificationclick', (event) => {
