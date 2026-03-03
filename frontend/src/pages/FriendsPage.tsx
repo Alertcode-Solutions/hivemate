@@ -37,6 +37,13 @@ const FriendsPage = () => {
   const API_URL = getApiBaseUrl();
   const currentUserId = localStorage.getItem('userId') || '';
   const isOwnList = !userId || String(userId) === String(currentUserId);
+  const handleUnauthorized = () => {
+    localStorage.removeItem('token');
+    localStorage.removeItem('userId');
+    localStorage.removeItem('privateKey');
+    localStorage.removeItem('publicKey');
+    navigate('/login');
+  };
 
   useEffect(() => {
     fetchFriends();
@@ -45,6 +52,10 @@ const FriendsPage = () => {
   const fetchFriends = async () => {
     try {
       const token = localStorage.getItem('token');
+      if (!token) {
+        handleUnauthorized();
+        return;
+      }
       const endpoint = isOwnList ? `${API_URL}/api/friends` : `${API_URL}/api/friends/user/${userId}`;
       const response = await fetch(endpoint, {
         headers: { Authorization: `Bearer ${token}` }
@@ -58,6 +69,8 @@ const FriendsPage = () => {
         } else {
           setOwnerName('');
         }
+      } else if (response.status === 401) {
+        handleUnauthorized();
       }
     } catch (error) {
       console.error('Failed to fetch friends:', error);

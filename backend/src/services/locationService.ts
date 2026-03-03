@@ -47,8 +47,8 @@ export class LocationService {
       { upsert: true, new: true }
     );
 
-    // Invalidate nearby users cache for this area
-    await CacheService.deletePattern('nearby:*');
+    // Nearby cache has a short TTL; invalidate asynchronously to avoid blocking updates.
+    void CacheService.deletePattern('nearby:*');
 
     // Set cooldown
     await redis.setex(cooldownKey, LOCATION_UPDATE_COOLDOWN, '1');
@@ -71,7 +71,8 @@ export class LocationService {
       { new: true }
     );
 
-    await CacheService.deletePattern('nearby:*');
+    // Nearby cache has a short TTL; invalidate asynchronously to avoid blocking mode toggles.
+    void CacheService.deletePattern('nearby:*');
   }
 
   /**
@@ -117,7 +118,6 @@ export class LocationService {
     }
 
     const results = await Location.find(query)
-      .populate('userId', 'email')
       .lean() // Use lean() for better performance
       .limit(100); // Limit results to prevent excessive data
 

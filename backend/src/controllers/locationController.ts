@@ -15,8 +15,6 @@ export const updateLocation = async (req: Request, res: Response) => {
     const userId = (req as any).userId;
     const { latitude, longitude, accuracy, mode } = req.body;
 
-    console.log('updateLocation called by:', userId);
-    console.log('Location data:', { latitude, longitude, mode });
 
     // Validation
     if (latitude === undefined || longitude === undefined) {
@@ -48,7 +46,6 @@ export const updateLocation = async (req: Request, res: Response) => {
       mode
     );
 
-    console.log('Location updated successfully for user:', userId, 'Mode:', mode);
 
     // Broadcast location update to nearby users via WebSocket
     try {
@@ -62,7 +59,6 @@ export const updateLocation = async (req: Request, res: Response) => {
         userId
       );
 
-      console.log('Notifying nearby users:', nearbyLocations.length);
 
       // Notify nearby users of location update
       const nearbyUserIds = nearbyLocations
@@ -116,8 +112,6 @@ export const getNearbyUsers = async (req: Request, res: Response) => {
     const userId = (req as any).userId;
     const { lat, lng, radius } = req.query;
 
-    console.log('getNearbyUsers called by:', userId);
-    console.log('Query params:', { lat, lng, radius });
 
     // Validation
     if (!lat || !lng) {
@@ -144,7 +138,6 @@ export const getNearbyUsers = async (req: Request, res: Response) => {
       });
     }
 
-    console.log('Searching for users near:', { latitude, longitude, radiusInMeters });
 
     // Get nearby users
     const nearbyLocations = await LocationService.getNearbyUsers(
@@ -154,35 +147,27 @@ export const getNearbyUsers = async (req: Request, res: Response) => {
       userId
     );
 
-    console.log('Found nearby locations:', nearbyLocations.length);
 
     // Get profiles for nearby users
     const userIds = nearbyLocations
       .map(loc => extractUserId(loc.userId))
       .filter(Boolean);
-    console.log('Looking for profiles with userIds:', userIds.map(id => id.toString()));
-    const profiles = await Profile.find({ userId: { $in: userIds } });
-
-    console.log('Found profiles:', profiles.length);
-    if (profiles.length > 0) {
-      console.log('Sample profile:', {
-        userId: profiles[0].userId.toString(),
-        name: profiles[0].name,
-        gender: profiles[0].gender
-      });
-    }
+    const profiles = await Profile.find(
+      { userId: { $in: userIds } },
+      { userId: 1, name: 1, gender: 1, photos: 1 }
+    ).lean();
+    const profileByUserId = new Map(
+      profiles.map((profile: any) => [profile.userId.toString(), profile])
+    );
 
     // Build radar dots
     const radarDots = nearbyLocations.map(location => {
       const locationUserId = extractUserId(location.userId);
-      const profile = profiles.find(p => p.userId.toString() === locationUserId);
+      const profile = profileByUserId.get(locationUserId);
       if (!profile) {
         return null;
       }
       const [lng, lat] = location.coordinates.coordinates;
-      
-      console.log('Mapping location userId:', locationUserId, 'Found profile:', profile ? profile.name : 'NOT FOUND');
-      
       const distance = LocationService.calculateDistance(
         latitude,
         longitude,
@@ -202,11 +187,6 @@ export const getNearbyUsers = async (req: Request, res: Response) => {
         photo: profile.photos?.[0] || ''
       };
     }).filter(Boolean);
-
-    console.log('Returning radar dots:', radarDots.length);
-    if (radarDots.length > 0) {
-      console.log('Sample radar dot:', radarDots[0]);
-    }
 
     res.json({
       nearbyUsers: radarDots,

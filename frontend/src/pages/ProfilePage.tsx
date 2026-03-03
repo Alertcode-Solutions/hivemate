@@ -68,6 +68,13 @@ const ProfilePage = () => {
     otp: ''
   });
   const photoInputRef = useRef<HTMLInputElement>(null);
+  const handleUnauthorized = () => {
+    localStorage.removeItem('token');
+    localStorage.removeItem('userId');
+    localStorage.removeItem('privateKey');
+    localStorage.removeItem('publicKey');
+    navigate('/login');
+  };
 
   const API_URL = getApiBaseUrl();
   const normalizeId = (value: any): string => {
@@ -271,6 +278,10 @@ const ProfilePage = () => {
   const fetchProfile = async (userId: string) => {
     try {
       const token = localStorage.getItem('token');
+      if (!token) {
+        handleUnauthorized();
+        return;
+      }
       const response = await fetch(`${API_URL}/api/profiles/${userId}`, {
         headers: { Authorization: `Bearer ${token}` }
       });
@@ -302,6 +313,8 @@ const ProfilePage = () => {
           setRelationshipStatus('connected');
           setMatchStatus(null);
         }
+      } else if (response.status === 401) {
+        handleUnauthorized();
       }
     } catch (error) {
       console.error('Failed to fetch profile:', error);
@@ -359,6 +372,10 @@ const ProfilePage = () => {
   const saveProfilePayload = async (payload: any) => {
     const token = localStorage.getItem('token');
     const userId = localStorage.getItem('userId');
+    if (!token || !userId) {
+      handleUnauthorized();
+      throw new Error('Unauthorized');
+    }
     const response = await fetch(`${API_URL}/api/profiles/${userId}`, {
       method: 'PUT',
       headers: {
@@ -369,6 +386,9 @@ const ProfilePage = () => {
     });
 
     if (!response.ok) {
+      if (response.status === 401) {
+        handleUnauthorized();
+      }
       throw new Error('Failed to update profile');
     }
     const data = await response.json();

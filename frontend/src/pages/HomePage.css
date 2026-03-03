@@ -501,21 +501,24 @@
 
 @media (max-width: 768px) {
   .homepage {
-    padding-top: 82px;
+    padding-top: calc(104px + env(safe-area-inset-top));
     padding-bottom: calc(84px + env(safe-area-inset-bottom));
   }
 
   .homepage-header {
-    width: 100%;
-    border-radius: 0;
-    padding: 0.8rem 0.75rem;
-    top: 0;
-    left: 0;
-    right: 0;
+    width: auto;
+    border-radius: 22px;
+    padding: 0.85rem 0.95rem;
+    top: calc(10px + env(safe-area-inset-top));
+    left: 0.75rem;
+    right: 0.75rem;
+    box-shadow:
+      0 14px 28px rgba(9, 20, 41, 0.36),
+      inset 0 1px 0 rgba(255, 255, 255, 0.1);
   }
 
   .app-name {
-    font-size: 1.45rem;
+    font-size: 1.9rem;
   }
 
   .header-actions {

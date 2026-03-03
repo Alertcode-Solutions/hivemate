@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Socket } from 'socket.io-client';
 import ProfilePreviewModal from './ProfilePreviewModal';
 import LoadingDots from './LoadingDots';
@@ -38,6 +39,7 @@ interface SelectedRadarUser {
 
 const RADAR_SCAN_CYCLE_MS = 700;
 const SCROLL_LOG_THROTTLE_MS = 180;
+const RADAR_RESPONSE_CACHE_TTL_MS = 8000;
 
 const isScrollDebugEnabled = () => {
   if (typeof window === 'undefined') return false;
@@ -51,7 +53,21 @@ const isScrollDebugEnabled = () => {
   return false;
 };
 
+const getCurrentPositionAsync = (options: PositionOptions): Promise<{ lat: number; lng: number }> =>
+  new Promise((resolve, reject) => {
+    navigator.geolocation.getCurrentPosition(
+      (position) =>
+        resolve({
+          lat: position.coords.latitude,
+          lng: position.coords.longitude
+        }),
+      (error) => reject(error),
+      options
+    );
+  });
+
 const RadarView = () => {
+  const navigate = useNavigate();
   const getStoredVisibilityMode = (): 'explore' | 'vanish' => {
     const savedMode = localStorage.getItem('radarVisibilityMode');
     return savedMode === 'explore' || savedMode === 'vanish' ? savedMode : 'explore';
@@ -95,8 +111,17 @@ const RadarView = () => {
   const distanceRangeRef = useRef(distanceRange);
   const nearbyCountRef = useRef(nearbyUsers.length);
   const filteredCountRef = useRef(filteredUsers.length);
+  const nearbyFetchAbortRef = useRef<AbortController | null>(null);
+  const nearbyResponseCacheRef = useRef<Map<string, { at: number; users: RadarDot[] }>>(new Map());
 
   const API_URL = getApiBaseUrl();
+  const handleUnauthorized = () => {
+    localStorage.removeItem('token');
+    localStorage.removeItem('userId');
+    localStorage.removeItem('privateKey');
+    localStorage.removeItem('publicKey');
+    navigate('/login');
+  };
 
   const logRadarDebug = (label: string, extra: Record<string, unknown> = {}) => {
     if (!scrollDebugEnabledRef.current || typeof window === 'undefined') return;
@@ -197,27 +222,24 @@ const RadarView = () => {
   };
 
   const requestCurrentLocation = async (): Promise<{ lat: number; lng: number }> => {
-    return new Promise((resolve, reject) => {
-      if (!navigator.geolocation) {
-        reject(new Error('Geolocation is not supported by your browser.'));
-        return;
-      }
+    if (!navigator.geolocation) {
+      throw new Error('Geolocation is not supported by your browser.');
+    }
 
-      navigator.geolocation.getCurrentPosition(
-        (position) => {
-          resolve({
-            lat: position.coords.latitude,
-            lng: position.coords.longitude
-          });
-        },
-        (error) => reject(error),
-        {
-          enableHighAccuracy: true,
-          maximumAge: 10000,
-          timeout: 15000
-        }
-      );
-    });
+    // Mobile-first: get a quick coarse fix first, then fall back to high accuracy.
+    try {
+      return await getCurrentPositionAsync({
+        enableHighAccuracy: false,
+        maximumAge: 120000,
+        timeout: 4500
+      });
+    } catch {
+      return await getCurrentPositionAsync({
+        enableHighAccuracy: true,
+        maximumAge: 10000,
+        timeout: 12000
+      });
+    }
   };
 
   useEffect(() => {
@@ -552,22 +574,43 @@ const RadarView = () => {
     }
   }, [filteredUsers, focusedUserId]);
 
+  useEffect(() => {
+    return () => {
+      nearbyFetchAbortRef.current?.abort();
+    };
+  }, []);
+
   const fetchNearbyUsers = async (
     location = userLocation,
     options: { silent?: boolean } = {}
   ) => {
     if (!location) return;
+    const radiusInMeters = distanceRange * 1000; // Convert km to meters
+    const cacheKey = `${location.lat.toFixed(4)}:${location.lng.toFixed(4)}:${radiusInMeters}`;
+    const cached = nearbyResponseCacheRef.current.get(cacheKey);
+    const now = Date.now();
+    if (cached && now - cached.at < RADAR_RESPONSE_CACHE_TTL_MS) {
+      setNearbyUsers(cached.users);
+      return;
+    }
 
     if (!options.silent) {
       setLoading(true);
     }
     try {
       const token = localStorage.getItem('token');
-      const radiusInMeters = distanceRange * 1000; // Convert km to meters
+      if (!token) {
+        handleUnauthorized();
+        return;
+      }
+      nearbyFetchAbortRef.current?.abort();
+      const controller = new AbortController();
+      nearbyFetchAbortRef.current = controller;
       const response = await fetch(
         `${API_URL}/api/location/nearby?lat=${location.lat}&lng=${location.lng}&radius=${radiusInMeters}`,
         {
-          headers: { Authorization: `Bearer ${token}` }
+          headers: { Authorization: `Bearer ${token}` },
+          signal: controller.signal
         }
       );
 
@@ -584,9 +627,15 @@ const RadarView = () => {
           name: user.name,
           photo: user.photo || ''
         }));
+        nearbyResponseCacheRef.current.set(cacheKey, { at: now, users: mappedUsers });
         setNearbyUsers(mappedUsers);
+      } else if (response.status === 401) {
+        handleUnauthorized();
       }
     } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        return;
+      }
       logRadarError('fetchNearbyUsers', error, {
         lat: location?.lat,
         lng: location?.lng,
@@ -607,7 +656,11 @@ const RadarView = () => {
 
     try {
       const token = localStorage.getItem('token');
-      await fetch(`${API_URL}/api/location/update`, {
+      if (!token) {
+        handleUnauthorized();
+        return;
+      }
+      const response = await fetch(`${API_URL}/api/location/update`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -619,6 +672,10 @@ const RadarView = () => {
           mode
         })
       });
+      if (response.status === 401) {
+        handleUnauthorized();
+        return;
+      }
 
       // Emit location update via WebSocket
       if (socketRef.current) {
@@ -670,6 +727,10 @@ const RadarView = () => {
       setFocusedUserId(null);
       try {
         const token = localStorage.getItem('token');
+        if (!token) {
+          handleUnauthorized();
+          return;
+        }
         const response = await fetch(`${API_URL}/api/location/visibility/mode`, {
           method: 'PUT',
           headers: {
@@ -702,6 +763,10 @@ const RadarView = () => {
       setVisibilityMode('explore');
 
       const token = localStorage.getItem('token');
+      if (!token) {
+        handleUnauthorized();
+        return;
+      }
       const response = await fetch(`${API_URL}/api/location/visibility/mode`, {
         method: 'PUT',
         headers: {
