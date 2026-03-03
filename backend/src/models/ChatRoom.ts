@@ -41,5 +41,6 @@ const ChatRoomSchema: Schema = new Schema({
 // Index for efficient participant queries
 ChatRoomSchema.index({ participants: 1 });
 ChatRoomSchema.index({ type: 1, participants: 1 });
+ChatRoomSchema.index({ participants: 1, hiddenForUsers: 1, lastMessageAt: -1 });
 
 export default mongoose.model<IChatRoom>('ChatRoom', ChatRoomSchema);

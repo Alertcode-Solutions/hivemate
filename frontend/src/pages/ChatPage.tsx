@@ -193,9 +193,12 @@ const ChatPage = () => {
   const messagesSyncInFlightRef = useRef(false);
   const longPressTimerRef = useRef<number | null>(null);
   const longPressMovedRef = useRef(false);
+  const longPressTriggeredRef = useRef(false);
+  const longPressStartRef = useRef<{ x: number; y: number } | null>(null);
   const activePointerIdRef = useRef<number | null>(null);
   const chatLongPressTimerRef = useRef<number | null>(null);
   const chatLongPressMovedRef = useRef(false);
+  const chatLongPressStartRef = useRef<{ x: number; y: number } | null>(null);
   const activeChatPointerIdRef = useRef<number | null>(null);
   const chatLongPressTriggeredRef = useRef(false);
   const isAtBottomRef = useRef(true);
@@ -226,6 +229,16 @@ const ChatPage = () => {
   const decryptedMessageCacheRef = useRef<Record<string, { cipher: string; text: string }>>({});
   const pendingOutgoingByRoomRef = useRef<Record<string, Message[]>>({});
   const deletedChatTombstonesRef = useRef<Record<string, number>>({});
+  const deletedMessageTombstonesRef = useRef<Record<string, number>>({});
+  const sendingInFlightRef = useRef(false);
+  const messagesAbortControllerRef = useRef<AbortController | null>(null);
+  const reactionMutationInFlightRef = useRef<Record<string, boolean>>({});
+  const reactionSocketDebounceTimersRef = useRef<Record<string, number>>({});
+  const reactionSocketPendingRef = useRef<
+    Record<string, Array<{ userId: string; emoji: string; reactedAt?: Date | string }>>
+  >({});
+  const deleteMessageInFlightRef = useRef<Record<string, boolean>>({});
+  const deleteForEveryoneInFlightRef = useRef<Record<string, boolean>>({});
 
   const API_URL = getApiBaseUrl();
   const currentUserId = localStorage.getItem('userId');
@@ -234,6 +247,7 @@ const ChatPage = () => {
   const currentUserIdStr = String(currentUserId || '');
   const pinnedStorageKey = `chat:pinned:${currentUserIdStr}`;
   const mutedStorageKey = `chat:muted:${currentUserIdStr}`;
+  const chatRoomsCacheKey = `chat:rooms:${currentUserIdStr}`;
   const normalizeId = (value: any): string => {
     if (!value) return '';
     if (typeof value === 'string') return value;
@@ -345,14 +359,55 @@ const ChatPage = () => {
     }
   };
 
+  const areMessageListsEquivalent = (left: Message[], right: Message[]) => {
+    if (left === right) return true;
+    if (left.length !== right.length) return false;
+    for (let index = 0; index < left.length; index += 1) {
+      const a = left[index];
+      const b = right[index];
+      if (normalizeId(a.id) !== normalizeId(b.id)) return false;
+      if (normalizeId(a.replyToMessageId || '') !== normalizeId(b.replyToMessageId || '')) return false;
+      if (String(a.encryptedContent || '') !== String(b.encryptedContent || '')) return false;
+      if (Boolean(a.delivered) !== Boolean(b.delivered)) return false;
+      if (Boolean(a.read) !== Boolean(b.read)) return false;
+      if (Boolean(a.deletedForEveryone) !== Boolean(b.deletedForEveryone)) return false;
+      const aReactions = (a.reactions || [])
+        .map((reaction) => `${normalizeId(reaction.userId)}:${reaction.emoji}:${new Date(reaction.reactedAt || 0).getTime()}`)
+        .sort();
+      const bReactions = (b.reactions || [])
+        .map((reaction) => `${normalizeId(reaction.userId)}:${reaction.emoji}:${new Date(reaction.reactedAt || 0).getTime()}`)
+        .sort();
+      if (aReactions.length !== bReactions.length) return false;
+      for (let reactionIndex = 0; reactionIndex < aReactions.length; reactionIndex += 1) {
+        if (aReactions[reactionIndex] !== bReactions[reactionIndex]) return false;
+      }
+      if (new Date(a.timestamp).getTime() !== new Date(b.timestamp).getTime()) return false;
+    }
+    return true;
+  };
+
   const mergeServerAndPendingMessages = (chatRoomId: string, serverMessages: Message[]) => {
     const roomId = String(chatRoomId);
     const pending = pendingOutgoingByRoomRef.current[roomId] || [];
     if (!pending.length) return upsertMessagesById(serverMessages);
     const merged = [...serverMessages];
     const existingIds = new Set(serverMessages.map((message) => normalizeId(message.id)));
+    const pendingAlreadyPersisted = (pendingMessage: Message) => {
+      const pendingSenderId = normalizeId(pendingMessage.senderId);
+      const pendingText = String(pendingMessage.encryptedContent || '').trim();
+      const pendingReplyId = normalizeId(pendingMessage.replyToMessageId || '');
+      const pendingTimestamp = new Date(pendingMessage.timestamp).getTime();
+      return serverMessages.some((serverMessage) => {
+        const sameSender = normalizeId(serverMessage.senderId) === pendingSenderId;
+        const sameText = String(serverMessage.encryptedContent || '').trim() === pendingText;
+        const sameReplyId = normalizeId(serverMessage.replyToMessageId || '') === pendingReplyId;
+        const serverTimestamp = new Date(serverMessage.timestamp).getTime();
+        const closeInTime = Math.abs(serverTimestamp - pendingTimestamp) <= 30_000;
+        return sameSender && sameText && sameReplyId && closeInTime;
+      });
+    };
     for (const pendingMessage of pending) {
-      if (!existingIds.has(normalizeId(pendingMessage.id))) {
+      if (!existingIds.has(normalizeId(pendingMessage.id)) && !pendingAlreadyPersisted(pendingMessage)) {
         merged.push(pendingMessage);
       }
     }
@@ -450,14 +505,29 @@ const ChatPage = () => {
       return;
     }
 
+    try {
+      const cachedRooms = JSON.parse(localStorage.getItem(chatRoomsCacheKey) || '[]');
+      if (Array.isArray(cachedRooms) && cachedRooms.length > 0) {
+        setChatRooms(cachedRooms);
+        void hydrateParticipantPhotos(cachedRooms);
+        setLoading(false);
+      }
+    } catch {
+      // ignore malformed cache
+    }
+
     initializeEncryption();
     loadChatRooms();
     const cleanupSocket = setupWebSocket();
 
     return () => {
+      if (messagesAbortControllerRef.current) {
+        messagesAbortControllerRef.current.abort();
+        messagesAbortControllerRef.current = null;
+      }
       cleanupSocket?.();
     };
-  }, []);
+  }, [chatRoomsCacheKey]);
 
   useEffect(() => {
     if (!currentUserIdStr) return;
@@ -679,7 +749,15 @@ const ChatPage = () => {
   }, []);
 
   useEffect(() => {
-    const closePopups = () => {
+    const closePopups = (event: MouseEvent) => {
+      const target = event.target as Element | null;
+      if (
+        target?.closest('.message-action-sheet') ||
+        target?.closest('.reaction-sheet') ||
+        target?.closest('.emoji-picker-panel')
+      ) {
+        return;
+      }
       setActionSheet(null);
       setChatActionSheet(null);
       setShowEmojiPicker(false);
@@ -877,6 +955,10 @@ const ChatPage = () => {
     const handleMessageReceive = async (data: any) => {
       console.log('Received message:', data);
       const incomingRoomId = String(data?.chatRoomId || '');
+      const incomingMessageId = normalizeId(data?.messageId);
+      if (incomingMessageId && deletedMessageTombstonesRef.current[incomingMessageId]) {
+        return;
+      }
       if (incomingRoomId) {
         delete deletedChatTombstonesRef.current[incomingRoomId];
       }
@@ -890,10 +972,11 @@ const ChatPage = () => {
 
         if (selectedChatRoomRef.current && data.chatRoomId === selectedChatRoomRef.current.chatRoomId) {
           const newMessage: Message = {
-            id: normalizeId(data.messageId),
+            id: incomingMessageId,
             senderId: data.senderId,
             receiverId: currentUserId!,
             encryptedContent: decryptedContent,
+            replyToMessageId: data.replyToMessageId || null,
             timestamp: new Date(data.timestamp),
             delivered: true,
             read: false,
@@ -933,10 +1016,11 @@ const ChatPage = () => {
       } catch (error) {
         if (selectedChatRoomRef.current && data.chatRoomId === selectedChatRoomRef.current.chatRoomId) {
           const unreadableMessage: Message = {
-            id: normalizeId(data.messageId),
+            id: incomingMessageId,
             senderId: data.senderId,
             receiverId: currentUserId!,
             encryptedContent: CIPHERTEXT_PLACEHOLDER,
+            replyToMessageId: data.replyToMessageId || null,
             timestamp: new Date(data.timestamp),
             delivered: true,
             read: false,
@@ -984,22 +1068,18 @@ const ChatPage = () => {
       const incomingChatRoomId = String(data?.chatRoomId || '');
       const activeRoomId = String(selectedChatRoomRef.current?.chatRoomId || '');
       if (!incomingChatRoomId || incomingChatRoomId !== activeRoomId) return;
-
-      setMessages((prev) =>
-        prev.map((msg) =>
-          String(msg.id) === String(data?.messageId)
-            ? {
-                ...msg,
-                reactions: Array.isArray(data?.reactions)
-                  ? data.reactions.map((reaction: any) => ({
-                      userId: String(reaction.userId),
-                      emoji: reaction.emoji,
-                      reactedAt: reaction.reactedAt
-                    }))
-                  : []
-              }
-            : msg
-        )
+      const messageId = normalizeId(data?.messageId);
+      if (!messageId) return;
+      if (reactionMutationInFlightRef.current[messageId]) return;
+      applyReactionsToMessage(
+        messageId,
+        Array.isArray(data?.reactions)
+          ? data.reactions.map((reaction: any) => ({
+              userId: String(reaction.userId),
+              emoji: reaction.emoji,
+              reactedAt: reaction.reactedAt
+            }))
+          : []
       );
     };
 
@@ -1070,6 +1150,7 @@ const ChatPage = () => {
           (chat: ChatRoom) => !deletedChatTombstonesRef.current[String(chat.chatRoomId)]
         );
         setChatRooms(chats);
+        localStorage.setItem(chatRoomsCacheKey, JSON.stringify(chats));
         // Do not block initial chat list render/open on profile photo hydration.
         void hydrateParticipantPhotos(chats);
         
@@ -1178,14 +1259,17 @@ const ChatPage = () => {
     const token = localStorage.getItem('token');
     if (!token) return;
 
-    const participantIds = Array.from(
-      new Set(
-        rooms
-          .flatMap((room) => room.participants)
-          .map((p) => String(p.userId))
-          .filter((id) => id && id !== currentUserIdStr)
-      )
-    );
+    const participants = rooms
+      .flatMap((room) => room.participants)
+      .filter((participant) => String(participant.userId) && String(participant.userId) !== currentUserIdStr);
+    const participantIds = Array.from(new Set(participants.map((participant) => String(participant.userId))));
+
+    for (const participant of participants) {
+      const participantId = String(participant.userId);
+      if (participant.photo) {
+        photoCacheRef.current[participantId] = participant.photo;
+      }
+    }
 
     const missingIds = participantIds.filter((id) => !(id in photoCacheRef.current));
     if (missingIds.length === 0) {
@@ -1217,10 +1301,16 @@ const ChatPage = () => {
 
   const loadMessages = async (chatRoomId: string) => {
     const loadId = ++activeMessagesLoadRef.current;
+    if (messagesAbortControllerRef.current) {
+      messagesAbortControllerRef.current.abort();
+    }
+    const controller = new AbortController();
+    messagesAbortControllerRef.current = controller;
     try {
       const token = localStorage.getItem('token');
       const response = await fetch(`${API_URL}/api/messages/chat/${chatRoomId}`, {
-        headers: { Authorization: `Bearer ${token}` }
+        headers: { Authorization: `Bearer ${token}` },
+        signal: controller.signal
       });
 
       if (response.ok) {
@@ -1265,8 +1355,11 @@ const ChatPage = () => {
           isAtBottomRef.current = true;
         }
         const mergedMessages = mergeServerAndPendingMessages(chatRoomId, decryptedMessages);
-        setMessages(mergedMessages);
-        roomMessagesCacheRef.current[String(chatRoomId)] = mergedMessages;
+        const filteredMessages = mergedMessages.filter(
+          (message) => !deletedMessageTombstonesRef.current[normalizeId(message.id)]
+        );
+        setMessages((prev) => (areMessageListsEquivalent(prev, filteredMessages) ? prev : filteredMessages));
+        roomMessagesCacheRef.current[String(chatRoomId)] = filteredMessages;
         if (isFirstLoadForRoom) {
           initialScrollDoneRef.current = normalizedRoomId;
         }
@@ -1280,7 +1373,12 @@ const ChatPage = () => {
         void clearNativeAppBadge();
       }
     } catch (error) {
+      if ((error as any)?.name === 'AbortError') return;
       console.error('Failed to load messages:', error);
+    } finally {
+      if (messagesAbortControllerRef.current === controller) {
+        messagesAbortControllerRef.current = null;
+      }
     }
   };
 
@@ -1299,10 +1397,11 @@ const ChatPage = () => {
 
   const sendMessage = async () => {
     const sanitizedMessage = messageInput.trim();
-    if (!sanitizedMessage || !selectedChatRoom || !encryptionReady) return;
+    if (!sanitizedMessage || !selectedChatRoom || !encryptionReady || sendingInFlightRef.current) return;
     const replyContext = replyTarget;
 
     triggerHaptic(50);
+    sendingInFlightRef.current = true;
     setSending(true);
     const tempMessageId = `temp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const roomId = String(selectedChatRoom.chatRoomId);
@@ -1351,7 +1450,6 @@ const ChatPage = () => {
         typingStopTimeoutRef.current = null;
       }
       setIsPeerTyping(false);
-      setSending(false);
 
       // Encrypt for receiver and sender (sender must read own history later).
       let encryptedContent: string;
@@ -1394,21 +1492,27 @@ const ChatPage = () => {
       if (response.ok) {
         const data = await response.json();
         const realMessageId = normalizeId(data.messageData.id);
+        delete deletedMessageTombstonesRef.current[tempMessageId];
+        delete deletedMessageTombstonesRef.current[realMessageId];
         pendingOutgoingByRoomRef.current[roomId] = (pendingOutgoingByRoomRef.current[roomId] || []).filter(
           (message) => normalizeId(message.id) !== tempMessageId
         );
-        setMessages((prev) =>
-          prev.map((message) =>
-            normalizeId(message.id) === tempMessageId
-              ? {
-                  ...message,
-                  id: realMessageId,
-                  timestamp: new Date(data.messageData.timestamp),
-                  delivered: Boolean(data.messageData.delivered)
-                }
-              : message
-          )
-        );
+        setMessages((prev) => {
+          const updatedMessage: Message = {
+            id: realMessageId,
+            senderId: currentUserId!,
+            receiverId,
+            encryptedContent: sanitizedMessage,
+            replyToMessageId: replyContext?.messageId || null,
+            timestamp: new Date(data.messageData.timestamp),
+            delivered: Boolean(data.messageData.delivered),
+            read: false,
+            deletedForEveryone: false,
+            reactions: []
+          };
+          const withoutTemp = prev.filter((message) => normalizeId(message.id) !== tempMessageId);
+          return upsertMessagesById([...withoutTemp, updatedMessage]);
+        });
         setActionSheet(null);
       } else {
         pendingOutgoingByRoomRef.current[roomId] = (pendingOutgoingByRoomRef.current[roomId] || []).filter(
@@ -1427,6 +1531,7 @@ const ChatPage = () => {
       alert('Failed to send message');
     } finally {
       setSending(false);
+      sendingInFlightRef.current = false;
     }
   };
 
@@ -1463,92 +1568,132 @@ const ChatPage = () => {
     }
   };
 
+  const applyReactionsToMessage = (messageId: string, reactions: Array<{ userId: string; emoji: string; reactedAt?: Date | string }>) => {
+    const normalizedMessageId = normalizeId(messageId);
+    setMessages((prev) => {
+      const next = prev.map((message) =>
+        normalizeId(message.id) === normalizedMessageId
+          ? { ...message, reactions }
+          : message
+      );
+      const activeRoomId = String(selectedChatRoomRef.current?.chatRoomId || '');
+      if (activeRoomId) {
+        roomMessagesCacheRef.current[activeRoomId] = next;
+      }
+      return next;
+    });
+  };
+
   const reactToMessage = async (messageId: string, emoji: string) => {
+    const normalizedMessageId = normalizeId(messageId);
+    if (!normalizedMessageId || reactionMutationInFlightRef.current[normalizedMessageId]) return;
+    reactionMutationInFlightRef.current[normalizedMessageId] = true;
     triggerHaptic([30, 50, 30]);
+    setActionSheet(null);
+    const previousReactions =
+      messages.find((message) => normalizeId(message.id) === normalizedMessageId)?.reactions || [];
+    const myExistingReaction = previousReactions.find(
+      (reaction) => normalizeId(reaction.userId) === currentUserIdStr
+    );
+    const shouldRemoveReaction = Boolean(myExistingReaction && myExistingReaction.emoji === emoji);
+    const optimisticReaction = {
+      userId: currentUserIdStr,
+      emoji,
+      reactedAt: new Date().toISOString()
+    };
+    applyReactionsToMessage(
+      normalizedMessageId,
+      shouldRemoveReaction
+        ? previousReactions.filter((reaction) => normalizeId(reaction.userId) !== currentUserIdStr)
+        : [...previousReactions.filter((reaction) => normalizeId(reaction.userId) !== currentUserIdStr), optimisticReaction]
+    );
     try {
       const token = localStorage.getItem('token');
-      const response = await fetch(`${API_URL}/api/messages/${messageId}/reaction`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`
-        },
-        body: JSON.stringify({ emoji })
-      });
-      if (!response.ok) return;
+      const response = shouldRemoveReaction
+        ? await fetch(`${API_URL}/api/messages/${normalizedMessageId}/reaction`, {
+            method: 'DELETE',
+            headers: { Authorization: `Bearer ${token}` }
+          })
+        : await fetch(`${API_URL}/api/messages/${normalizedMessageId}/reaction`, {
+            method: 'PUT',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${token}`
+            },
+            body: JSON.stringify({ emoji })
+          });
+      if (!response.ok) {
+        applyReactionsToMessage(normalizedMessageId, previousReactions);
+        return;
+      }
       const data = await response.json();
-      setMessages((prev) =>
-        prev.map((message) =>
-          String(message.id) === String(messageId)
-            ? {
-                ...message,
-                reactions: Array.isArray(data?.reactions)
-                  ? data.reactions.map((reaction: any) => ({
-                      userId: String(reaction.userId),
-                      emoji: reaction.emoji,
-                      reactedAt: reaction.reactedAt
-                    }))
-                  : []
-              }
-            : message
-        )
+      applyReactionsToMessage(
+        normalizedMessageId,
+        Array.isArray(data?.reactions)
+          ? data.reactions.map((reaction: any) => ({
+              userId: String(reaction.userId),
+              emoji: reaction.emoji,
+              reactedAt: reaction.reactedAt
+            }))
+          : []
       );
     } catch (error) {
       console.error('Failed to react to message:', error);
+      applyReactionsToMessage(normalizedMessageId, previousReactions);
     } finally {
-      setActionSheet(null);
+      reactionMutationInFlightRef.current[normalizedMessageId] = false;
     }
   };
 
   const removeReaction = async (messageId: string, event?: React.MouseEvent<HTMLButtonElement>) => {
     event?.stopPropagation();
+    const normalizedMessageId = normalizeId(messageId);
+    if (!normalizedMessageId || reactionMutationInFlightRef.current[normalizedMessageId]) return;
+    reactionMutationInFlightRef.current[normalizedMessageId] = true;
     triggerHaptic([30, 50, 30]);
+    setActionSheet(null);
+    setReactionSheetMessageId(null);
     const snapshot = messages;
-    setMessages((prev) =>
-      prev.map((message) =>
-        String(message.id) === String(messageId)
-          ? {
-              ...message,
-              reactions: (message.reactions || []).filter(
-                (reaction) => normalizeId(reaction.userId) !== currentUserIdStr
-              )
-            }
-          : message
-      )
+    applyReactionsToMessage(
+      normalizedMessageId,
+      snapshot
+        .find((message) => normalizeId(message.id) === normalizedMessageId)
+        ?.reactions?.filter((reaction) => normalizeId(reaction.userId) !== currentUserIdStr) || []
     );
     try {
       const token = localStorage.getItem('token');
-      const response = await fetch(`${API_URL}/api/messages/${messageId}/reaction`, {
+      const response = await fetch(`${API_URL}/api/messages/${normalizedMessageId}/reaction`, {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${token}` }
       });
       if (!response.ok) {
         setMessages(snapshot);
+        const activeRoomId = String(selectedChatRoomRef.current?.chatRoomId || '');
+        if (activeRoomId) {
+          roomMessagesCacheRef.current[activeRoomId] = snapshot;
+        }
         return;
       }
       const data = await response.json();
-      setMessages((prev) =>
-        prev.map((message) =>
-          String(message.id) === String(messageId)
-            ? {
-                ...message,
-                reactions: Array.isArray(data?.reactions)
-                  ? data.reactions.map((reaction: any) => ({
-                      userId: String(reaction.userId),
-                      emoji: reaction.emoji,
-                      reactedAt: reaction.reactedAt
-                    }))
-                  : []
-              }
-            : message
-        )
+      applyReactionsToMessage(
+        normalizedMessageId,
+        Array.isArray(data?.reactions)
+          ? data.reactions.map((reaction: any) => ({
+              userId: String(reaction.userId),
+              emoji: reaction.emoji,
+              reactedAt: reaction.reactedAt
+            }))
+          : []
       );
     } catch (error) {
       console.error('Failed to remove reaction:', error);
       setMessages(snapshot);
+      const activeRoomId = String(selectedChatRoomRef.current?.chatRoomId || '');
+      if (activeRoomId) {
+        roomMessagesCacheRef.current[activeRoomId] = snapshot;
+      }
     } finally {
-      setActionSheet(null);
-      setReactionSheetMessageId(null);
+      reactionMutationInFlightRef.current[normalizedMessageId] = false;
     }
   };
 
@@ -1741,6 +1886,8 @@ const ChatPage = () => {
       Boolean(target.closest('.send-button')) ||
       Boolean(target.closest('.emoji-toggle-btn')) ||
       Boolean(target.closest('.emoji-picker-panel')) ||
+      Boolean(target.closest('.reply-preview')) ||
+      Boolean(target.closest('.reply-preview-close')) ||
       Boolean(target.closest('.attachment-button'));
 
     if (keepKeyboardOpen) return;
@@ -1955,6 +2102,10 @@ const ChatPage = () => {
     message: Message,
     isOwnMessage: boolean
   ) => {
+    if (longPressTriggeredRef.current) {
+      longPressTriggeredRef.current = false;
+      return;
+    }
     event.preventDefault();
     event.stopPropagation();
     const messageId = normalizeId(message.id);
@@ -1969,12 +2120,15 @@ const ChatPage = () => {
     isOwnMessage: boolean
   ) => {
     if (event.pointerType === 'mouse' && event.button !== 0) return;
+    longPressTriggeredRef.current = false;
     longPressMovedRef.current = false;
     activePointerIdRef.current = event.pointerId;
+    longPressStartRef.current = { x: event.clientX, y: event.clientY };
     const target = event.currentTarget;
     longPressTimerRef.current = window.setTimeout(() => {
       longPressTimerRef.current = null;
       if (longPressMovedRef.current) return;
+      longPressTriggeredRef.current = true;
       const messageId = normalizeId(message.id);
       setFocusedMessageId(messageId);
       const rect = target.getBoundingClientRect();
@@ -1987,19 +2141,25 @@ const ChatPage = () => {
       window.clearTimeout(longPressTimerRef.current);
       longPressTimerRef.current = null;
     }
+    longPressStartRef.current = null;
     activePointerIdRef.current = null;
   };
 
   const moveMessageLongPress = (event: React.PointerEvent<HTMLDivElement>) => {
     if (activePointerIdRef.current === null) return;
     if (event.pointerId !== activePointerIdRef.current) return;
-    if (Math.abs(event.movementX) > 6 || Math.abs(event.movementY) > 6) {
+    const start = longPressStartRef.current;
+    if (!start) return;
+    const movedX = Math.abs(event.clientX - start.x);
+    const movedY = Math.abs(event.clientY - start.y);
+    if (movedX > 8 || movedY > 8) {
       longPressMovedRef.current = true;
       cancelMessageLongPress();
     }
   };
 
   const prepareReplyFromMessage = (message: Message) => {
+    if (message.deletedForEveryone) return;
     const messageId = normalizeId(message.id);
     const senderName = normalizeId(message.senderId) === currentUserIdStr ? 'You' : getParticipantName(String(message.senderId));
     const safeText = String(message.encryptedContent || '').replace(/\s+/g, ' ').trim().slice(0, PREVIEW_REPLY_CHARS);
@@ -2033,6 +2193,7 @@ const ChatPage = () => {
     chatLongPressTriggeredRef.current = false;
     chatLongPressMovedRef.current = false;
     activeChatPointerIdRef.current = event.pointerId;
+    chatLongPressStartRef.current = { x: event.clientX, y: event.clientY };
     const target = event.currentTarget;
     chatLongPressTimerRef.current = window.setTimeout(() => {
       chatLongPressTimerRef.current = null;
@@ -2048,13 +2209,18 @@ const ChatPage = () => {
       window.clearTimeout(chatLongPressTimerRef.current);
       chatLongPressTimerRef.current = null;
     }
+    chatLongPressStartRef.current = null;
     activeChatPointerIdRef.current = null;
   };
 
   const moveChatLongPress = (event: React.PointerEvent<HTMLDivElement>) => {
     if (activeChatPointerIdRef.current === null) return;
     if (event.pointerId !== activeChatPointerIdRef.current) return;
-    if (Math.abs(event.movementX) > 6 || Math.abs(event.movementY) > 6) {
+    const start = chatLongPressStartRef.current;
+    if (!start) return;
+    const movedX = Math.abs(event.clientX - start.x);
+    const movedY = Math.abs(event.clientY - start.y);
+    if (movedX > 8 || movedY > 8) {
       chatLongPressMovedRef.current = true;
       cancelChatLongPress();
     }
@@ -2069,8 +2235,6 @@ const ChatPage = () => {
       x: touch.clientX,
       y: touch.clientY
     };
-    setSwipingMessageId(messageId);
-    setSwipeOffsets((prev) => ({ ...prev, [messageId]: 0 }));
   };
 
   const moveSwipeReply = (
@@ -2089,7 +2253,11 @@ const ChatPage = () => {
 
     if (diffX < 0) {
       setSwipeOffsets((prev) => ({ ...prev, [messageId]: 0 }));
+      setSwipingMessageId(null);
       return;
+    }
+    if (diffX > 8 && swipingMessageId !== messageId) {
+      setSwipingMessageId(messageId);
     }
     const nextOffset = Math.max(0, Math.min(MAX_SWIPE_DISTANCE, diffX));
     setSwipeOffsets((prev) => ({ ...prev, [messageId]: nextOffset }));
@@ -2142,21 +2310,45 @@ const ChatPage = () => {
 
   const deleteForMe = async () => {
     if (!actionSheet) return;
+    const messageId = normalizeId(actionSheet.messageId);
+    if (!messageId || deleteMessageInFlightRef.current[messageId]) return;
+    deleteMessageInFlightRef.current[messageId] = true;
+    const activeRoomId = String(selectedChatRoomRef.current?.chatRoomId || '');
+    setActionSheet(null);
+    setFocusedMessageId(null);
+    if (messageId) {
+      deletedMessageTombstonesRef.current[messageId] = Date.now();
+    }
+    if (activeRoomId) {
+      pendingOutgoingByRoomRef.current[activeRoomId] = (pendingOutgoingByRoomRef.current[activeRoomId] || []).filter(
+        (message) => normalizeId(message.id) !== messageId
+      );
+      roomMessagesCacheRef.current[activeRoomId] = (roomMessagesCacheRef.current[activeRoomId] || []).filter(
+        (message) => normalizeId(message.id) !== messageId
+      );
+    }
+    setMessages((prev) => prev.filter((m) => normalizeId(m.id) !== messageId));
     try {
       const token = localStorage.getItem('token');
-      const response = await fetch(`${API_URL}/api/messages/${actionSheet.messageId}/me`, {
+      const response = await fetch(`${API_URL}/api/messages/${messageId}/me`, {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${token}` }
       });
 
-      if (response.ok) {
-        setMessages((prev) => prev.filter((m) => String(m.id) !== String(actionSheet.messageId)));
+      if (!response.ok) {
+        delete deletedMessageTombstonesRef.current[messageId];
+        if (selectedChatRoomRef.current) {
+          void loadMessages(String(selectedChatRoomRef.current.chatRoomId));
+        }
       }
     } catch (error) {
       console.error('Delete for me failed:', error);
+      delete deletedMessageTombstonesRef.current[messageId];
+      if (selectedChatRoomRef.current) {
+        void loadMessages(String(selectedChatRoomRef.current.chatRoomId));
+      }
     } finally {
-      setActionSheet(null);
-      setFocusedMessageId(null);
+      deleteMessageInFlightRef.current[messageId] = false;
     }
   };
 
@@ -2248,27 +2440,50 @@ const ChatPage = () => {
 
   const deleteForEveryone = async () => {
     if (!actionSheet || !actionSheet.isOwn) return;
+    const messageId = normalizeId(actionSheet.messageId);
+    if (!messageId || deleteForEveryoneInFlightRef.current[messageId]) return;
+    deleteForEveryoneInFlightRef.current[messageId] = true;
+    setActionSheet(null);
+    setFocusedMessageId(null);
+    const previousMessage = messages.find((message) => normalizeId(message.id) === messageId) || null;
+    setMessages((prev) =>
+      prev.map((m) =>
+        normalizeId(m.id) === messageId
+          ? { ...m, encryptedContent: DELETED_MESSAGE_TEXT, deletedForEveryone: true }
+          : m
+      )
+    );
+    if (replyTargetLockRef.current?.messageId === messageId) {
+      replyTargetLockRef.current = null;
+      setReplyTarget(null);
+    }
     try {
       const token = localStorage.getItem('token');
-      const response = await fetch(`${API_URL}/api/messages/${actionSheet.messageId}/everyone`, {
+      const response = await fetch(`${API_URL}/api/messages/${messageId}/everyone`, {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${token}` }
       });
 
-      if (response.ok) {
-        setMessages((prev) =>
-          prev.map((m) =>
-            String(m.id) === String(actionSheet.messageId)
-              ? { ...m, encryptedContent: DELETED_MESSAGE_TEXT, deletedForEveryone: true }
-              : m
-          )
-        );
+      if (!response.ok) {
+        if (previousMessage) {
+          setMessages((prev) =>
+            prev.map((message) =>
+              normalizeId(message.id) === messageId ? previousMessage : message
+            )
+          );
+        }
       }
     } catch (error) {
       console.error('Delete for everyone failed:', error);
+      if (previousMessage) {
+        setMessages((prev) =>
+          prev.map((message) =>
+            normalizeId(message.id) === messageId ? previousMessage : message
+          )
+        );
+      }
     } finally {
-      setActionSheet(null);
-      setFocusedMessageId(null);
+      deleteForEveryoneInFlightRef.current[messageId] = false;
     }
   };
 
@@ -2703,7 +2918,6 @@ const ChatPage = () => {
                   onKeyDown={handleKeyPress}
                   onPaste={handleInputPaste}
                   rows={1}
-                  readOnly={sending}
                 />
                 <button
                   type="button"

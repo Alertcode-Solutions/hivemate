@@ -82,6 +82,7 @@ export const sendMessage = async (req: Request, res: Response) => {
         senderId,
         senderName: senderProfile?.name,
         encryptedContent,
+        replyToMessageId: message.replyToMessageId || null,
         timestamp: message.timestamp
       });
 
@@ -181,24 +182,15 @@ export const getChatHistory = async (req: Request, res: Response) => {
 
     // Get messages
     const messages = await Message.find(query)
+      .select('senderId receiverId encryptedContent senderEncryptedContent replyToMessageId timestamp delivered read deletedForEveryone reactions')
       .sort({ timestamp: -1 })
-      .limit(parseInt(limit as string));
+      .limit(parseInt(limit as string))
+      .lean();
 
-    // Mark messages as read
-    await Message.updateMany(
-      {
-        chatRoomId,
-        receiverId: userId,
-        read: false
-      },
-      { read: true }
-    );
-
-    // Remove message notifications for this conversation once user has opened/read it.
     const otherParticipantIds = Array.from(
       new Set(
         messages
-          .map((m) => m.senderId?.toString())
+          .map((m: any) => m.senderId?.toString())
           .filter((id) => Boolean(id) && id !== userId)
       )
     );
@@ -215,10 +207,21 @@ export const getChatHistory = async (req: Request, res: Response) => {
       });
     }
 
-    await Notification.deleteMany(messageNotificationQuery);
+    // Run post-read side effects in parallel to keep history API responsive.
+    await Promise.all([
+      Message.updateMany(
+        {
+          chatRoomId,
+          receiverId: userId,
+          read: false
+        },
+        { read: true }
+      ),
+      Notification.deleteMany(messageNotificationQuery)
+    ]);
 
     res.json({
-      messages: messages.reverse().map(msg => ({
+      messages: messages.reverse().map((msg: any) => ({
         id: msg._id,
         senderId: msg.senderId,
         receiverId: msg.receiverId,
@@ -255,69 +258,139 @@ export const getChatHistory = async (req: Request, res: Response) => {
 export const getUserChats = async (req: Request, res: Response) => {
   try {
     const userId = (req as any).userId;
+    const userObjectId = new mongoose.Types.ObjectId(userId);
 
-    // Backfill legacy data in background so chat list API stays fast.
-    const friendships = await Friendship.find({
-      $or: [{ user1Id: userId }, { user2Id: userId }],
-      blocked: false
-    })
-      .select('user1Id user2Id')
-      .lean();
-
-    void Promise.all(
-      friendships.map((friendship: any) => {
-        const friendId =
-          String(friendship.user1Id) === String(userId)
-            ? String(friendship.user2Id)
-            : String(friendship.user1Id);
-        return ChatService.getOrCreatePersonalChatRoom(userId, friendId);
+    // Backfill legacy data without blocking chat list response.
+    void (async () => {
+      const friendships = await Friendship.find({
+        $or: [{ user1Id: userId }, { user2Id: userId }],
+        blocked: false
       })
-    ).catch((backfillError) => {
+        .select('user1Id user2Id')
+        .lean();
+
+      await Promise.all(
+        friendships.map((friendship: any) => {
+          const friendId =
+            String(friendship.user1Id) === String(userId)
+              ? String(friendship.user2Id)
+              : String(friendship.user1Id);
+          return ChatService.getOrCreatePersonalChatRoom(userId, friendId);
+        })
+      );
+    })().catch((backfillError) => {
       console.error('Chat backfill error:', backfillError);
     });
 
     const chatRooms = await ChatService.getUserChatRooms(userId);
+    if (chatRooms.length === 0) {
+      return res.json({
+        chats: [],
+        total: 0
+      });
+    }
 
-    // Get last message for each chat
-    const chatsWithMessages = await Promise.all(
-      chatRooms.map(async (room) => {
-        const lastMessage = await Message.findOne({ chatRoomId: room._id })
-          .where('deletedForUsers').ne(userId)
-          .sort({ timestamp: -1 });
+    const chatRoomIds = chatRooms.map((room) => room._id);
 
-        // Get other participant(s)
-        const otherParticipants = room.participants.filter(
-          p => p.toString() !== userId
-        );
-
-        const profiles = await Profile.find({
-          userId: { $in: otherParticipants }
-        });
-
-        return {
-          chatRoomId: room._id,
-          type: room.type,
-          participants: profiles.map(p => ({
-            userId: p.userId,
-            name: p.name,
-            profession: p.profession
-          })),
-          lastMessage: lastMessage ? {
-            encryptedContent: lastMessage.encryptedContent,
-            timestamp: lastMessage.timestamp,
-            senderId: lastMessage.senderId
-          } : null,
-          lastMessageAt: room.lastMessageAt,
-          unreadCount: await Message.countDocuments({
-            chatRoomId: room._id,
-            receiverId: userId,
+    const [lastMessageDocs, unreadCountDocs] = await Promise.all([
+      Message.aggregate([
+        {
+          $match: {
+            chatRoomId: { $in: chatRoomIds },
+            deletedForUsers: { $ne: userObjectId }
+          }
+        },
+        {
+          $project: {
+            chatRoomId: 1,
+            encryptedContent: 1,
+            timestamp: 1,
+            senderId: 1
+          }
+        },
+        { $sort: { chatRoomId: 1, timestamp: -1 } },
+        {
+          $group: {
+            _id: '$chatRoomId',
+            message: { $first: '$$ROOT' }
+          }
+        }
+      ]),
+      Message.aggregate([
+        {
+          $match: {
+            chatRoomId: { $in: chatRoomIds },
+            receiverId: userObjectId,
             read: false,
             deletedForEveryone: { $ne: true },
-            deletedForUsers: { $ne: userId }
-          })
-        };
-      })
+            deletedForUsers: { $ne: userObjectId }
+          }
+        },
+        {
+          $group: {
+            _id: '$chatRoomId',
+            count: { $sum: 1 }
+          }
+        }
+      ])
+    ]);
+
+    const otherParticipantIds = Array.from(
+      new Set(
+        chatRooms.flatMap((room) =>
+          room.participants
+            .map((participant) => participant.toString())
+            .filter((participantId) => participantId !== String(userId))
+        )
+      )
     );
+
+    const profiles = await Profile.find({
+      userId: { $in: otherParticipantIds }
+    })
+      .select('userId name profession photos')
+      .lean();
+
+    const profileByUserId = new Map(
+      profiles.map((profile: any) => [String(profile.userId), profile])
+    );
+    const lastMessageByRoomId = new Map(
+      lastMessageDocs.map((entry: any) => [String(entry._id), entry.message])
+    );
+    const unreadCountByRoomId = new Map(
+      unreadCountDocs.map((entry: any) => [String(entry._id), Number(entry.count || 0)])
+    );
+
+    const chatsWithMessages = chatRooms.map((room) => {
+      const roomId = String(room._id);
+      const lastMessage = lastMessageByRoomId.get(roomId);
+      const participants = room.participants
+        .map((participant) => participant.toString())
+        .filter((participantId) => participantId !== String(userId))
+        .map((participantId) => profileByUserId.get(participantId))
+        .filter(Boolean)
+        .map((profile: any) => ({
+          userId: profile.userId,
+          name: profile.name,
+          profession: profile.profession,
+          photo: Array.isArray(profile.photos) && profile.photos.length > 0 ? profile.photos[0] : ''
+        }));
+
+      return {
+        chatRoomId: room._id,
+        type: room.type,
+        participants,
+        lastMessage: lastMessage
+          ? {
+              encryptedContent: lastMessage.encryptedContent,
+              timestamp: lastMessage.timestamp,
+              senderId: lastMessage.senderId
+            }
+          : null,
+        lastMessageAt: room.lastMessageAt,
+        unreadCount: unreadCountByRoomId.get(roomId) || 0
+      };
+    });
 
     res.json({
       chats: chatsWithMessages,
@@ -514,7 +587,12 @@ export const openPersonalChat = async (req: Request, res: Response) => {
           ? [{
               userId: friendProfile.userId,
               name: friendProfile.name,
-              profession: friendProfile.profession
+              profession: friendProfile.profession,
+              photo:
+                Array.isArray((friendProfile as any).photos) &&
+                (friendProfile as any).photos.length > 0
+                  ? (friendProfile as any).photos[0]
+                  : ''
             }]
           : [],
         lastMessage: null,

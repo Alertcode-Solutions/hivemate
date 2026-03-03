@@ -95,5 +95,7 @@ MessageSchema.path('reactions').default(() => []);
 
 // Compound index for efficient message queries
 MessageSchema.index({ chatRoomId: 1, timestamp: -1 });
+MessageSchema.index({ chatRoomId: 1, deletedForUsers: 1, timestamp: -1 });
+MessageSchema.index({ chatRoomId: 1, receiverId: 1, read: 1, deletedForEveryone: 1, timestamp: -1 });
 
 export default mongoose.model<IMessage>('Message', MessageSchema);
