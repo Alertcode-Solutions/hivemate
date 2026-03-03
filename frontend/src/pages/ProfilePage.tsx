@@ -823,7 +823,7 @@ const ProfilePage = () => {
   const openChatWithUser = () => {
     const targetUserId = normalizeId(profile?.userId || paramUserId);
     if (!targetUserId) return;
-    navigate(`/chat/${targetUserId}`);
+    navigate(`/chat?user=${encodeURIComponent(targetUserId)}`);
   };
 
   const openFriendList = () => {

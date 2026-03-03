@@ -1292,8 +1292,24 @@ const RadarView = () => {
         <div className="radar-container" ref={radarContainerRef}>
           {visibilityMode === 'vanish' ? (
             <div className="vanish-message">
-              <h3>You are in Vanish Mode</h3>
-              <p>Turn on Explore Mode to discover people nearby</p>
+              <div className="vanish-bee-scene" aria-hidden="true">
+                <div className="vanish-bee-aura" />
+                <div className="vanish-hex-ripple" />
+                <img src="/logo.svg" alt="" className="vanish-bee-logo" />
+                <div className="vanish-spark vanish-spark--1" />
+                <div className="vanish-spark vanish-spark--2" />
+                <div className="vanish-spark vanish-spark--3" />
+                <div className="vanish-particle vanish-particle--1" />
+                <div className="vanish-particle vanish-particle--2" />
+                <div className="vanish-particle vanish-particle--3" />
+                <div className="vanish-particle vanish-particle--4" />
+                <div className="vanish-particle vanish-particle--5" />
+                <div className="vanish-particle vanish-particle--6" />
+              </div>
+              <div className="vanish-copy">
+                <h3>You are in Vanish Mode</h3>
+                <p>Switch to Explore Mode when you want to discover people nearby.</p>
+              </div>
             </div>
           ) : (
             <>

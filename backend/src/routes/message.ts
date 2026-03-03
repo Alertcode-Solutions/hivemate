@@ -4,6 +4,7 @@ import {
   getChatHistory,
   getUserChats,
   openPersonalChat,
+  deleteChatForMe,
   deleteMessageForMe,
   deleteMessageForEveryone,
   reactToMessage,
@@ -16,6 +17,7 @@ const router = Router();
 // All message routes require authentication
 router.post('/', authenticate, sendMessage);
 router.get('/chats', authenticate, getUserChats);
+router.delete('/chats/:chatRoomId/me', authenticate, deleteChatForMe);
 router.post('/open/:friendId', authenticate, openPersonalChat);
 router.get('/chat/:chatRoomId', authenticate, getChatHistory);
 router.delete('/:messageId/me', authenticate, deleteMessageForMe);

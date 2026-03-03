@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import mongoose from 'mongoose';
 import Message from '../models/Message';
+import ChatRoom from '../models/ChatRoom';
 import Notification from '../models/Notification';
 import { ChatService } from '../services/chatService';
 import { InteractionService } from '../services/interactionService';
@@ -61,7 +62,7 @@ export const sendMessage = async (req: Request, res: Response) => {
     await message.save();
 
     // Update chat room last message time
-    await ChatService.updateLastMessageTime(roomId);
+    await ChatService.updateLastMessageTime(roomId, [senderId, receiverId]);
 
     // Increment interaction count
     try {
@@ -255,21 +256,25 @@ export const getUserChats = async (req: Request, res: Response) => {
   try {
     const userId = (req as any).userId;
 
-    // Backfill legacy data: ensure personal chat rooms exist for all active friendships.
+    // Backfill legacy data in background so chat list API stays fast.
     const friendships = await Friendship.find({
       $or: [{ user1Id: userId }, { user2Id: userId }],
       blocked: false
-    });
+    })
+      .select('user1Id user2Id')
+      .lean();
 
-    await Promise.all(
-      friendships.map((friendship) => {
+    void Promise.all(
+      friendships.map((friendship: any) => {
         const friendId =
-          friendship.user1Id.toString() === userId
-            ? friendship.user2Id.toString()
-            : friendship.user1Id.toString();
+          String(friendship.user1Id) === String(userId)
+            ? String(friendship.user2Id)
+            : String(friendship.user1Id);
         return ChatService.getOrCreatePersonalChatRoom(userId, friendId);
       })
-    );
+    ).catch((backfillError) => {
+      console.error('Chat backfill error:', backfillError);
+    });
 
     const chatRooms = await ChatService.getUserChatRooms(userId);
 
@@ -496,6 +501,9 @@ export const openPersonalChat = async (req: Request, res: Response) => {
     }
 
     const chatRoom = await ChatService.getOrCreatePersonalChatRoom(userId, friendId);
+    await ChatRoom.findByIdAndUpdate(chatRoom._id, {
+      $pull: { hiddenForUsers: userId }
+    });
     const friendProfile = await Profile.findOne({ userId: friendId }).lean();
 
     res.json({
@@ -640,6 +648,47 @@ export const deleteMessageForEveryone = async (req: Request, res: Response) => {
       error: {
         code: 'INTERNAL_SERVER_ERROR',
         message: 'An error occurred while deleting message',
+        timestamp: new Date().toISOString()
+      }
+    });
+  }
+};
+
+export const deleteChatForMe = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).userId;
+    const { chatRoomId } = req.params;
+
+    const isParticipant = await ChatService.isParticipant(chatRoomId, userId);
+    if (!isParticipant) {
+      return res.status(403).json({
+        error: {
+          code: 'FORBIDDEN',
+          message: 'You are not allowed to delete this chat',
+          timestamp: new Date().toISOString()
+        }
+      });
+    }
+
+    await Message.updateMany(
+      { chatRoomId },
+      { $addToSet: { deletedForUsers: userId } }
+    );
+
+    await ChatRoom.findByIdAndUpdate(chatRoomId, {
+      $addToSet: { hiddenForUsers: userId }
+    });
+
+    return res.json({
+      message: 'Chat deleted for you',
+      chatRoomId
+    });
+  } catch (error: any) {
+    console.error('Delete chat for me error:', error);
+    return res.status(500).json({
+      error: {
+        code: 'INTERNAL_SERVER_ERROR',
+        message: 'An error occurred while deleting chat',
         timestamp: new Date().toISOString()
       }
     });

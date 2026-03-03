@@ -245,7 +245,9 @@ const ProfilePreviewModal = ({
 
   const openChatWithUser = () => {
     onClose();
-    navigate(`/chat/${userId}`);
+    const normalizedUserId = normalizeId(profile?.userId || userId);
+    if (!normalizedUserId) return;
+    navigate(`/chat?user=${encodeURIComponent(normalizedUserId)}`);
   };
 
   const openProfile = () => {

@@ -50,7 +50,9 @@ const DELETED_MESSAGE_TEXT = 'This message was deleted';
 const MESSAGE_REACTION_OPTIONS = ['\u{1F44D}', '\u{2764}\u{FE0F}', '\u{1F602}', '\u{1F62E}', '\u{1F622}', '\u{1F64F}'];
 const QUICK_EMOJIS = ['\u{1F600}', '\u{1F602}', '\u{1F60D}', '\u{1F44D}', '\u{1F389}', '\u{1F525}', '\u{1F64F}', '\u{2764}\u{FE0F}'];
 const ACTION_SHEET_WIDTH = 264;
+const CHAT_ACTION_SHEET_WIDTH = 220;
 const ACTION_SHEET_MARGIN = 10;
+const LONG_PRESS_DURATION_MS = 500;
 const SWIPE_REPLY_THRESHOLD = 40;
 const MAX_SWIPE_DISTANCE = 60;
 const PREVIEW_REPLY_CHARS = 90;
@@ -70,6 +72,12 @@ type MessageActionSheetPosition = {
   alignX: 'left' | 'right';
   alignY: 'above' | 'below';
 };
+
+type ChatActionSheetState = {
+  chatRoomId: string;
+  x: number;
+  y: number;
+} | null;
 
 type ReactionViewer = {
   userId: string;
@@ -156,6 +164,9 @@ const ChatPage = () => {
     callerId?: string;
   } | null>(null);
   const [actionSheet, setActionSheet] = useState<MessageActionSheetState>(null);
+  const [chatActionSheet, setChatActionSheet] = useState<ChatActionSheetState>(null);
+  const [pinnedChatIds, setPinnedChatIds] = useState<string[]>([]);
+  const [mutedChatIds, setMutedChatIds] = useState<string[]>([]);
   const [isPeerTyping, setIsPeerTyping] = useState(false);
   const [chatSearch, setChatSearch] = useState('');
   const [isMobileView, setIsMobileView] = useState(false);
@@ -170,6 +181,8 @@ const ChatPage = () => {
   const [focusedMessageId, setFocusedMessageId] = useState<string | null>(null);
   const [peerOnline, setPeerOnline] = useState(false);
   const [peerLastSeen, setPeerLastSeen] = useState<string>('');
+  const [showScrollToBottomButton, setShowScrollToBottomButton] = useState(false);
+  const [chatOpenError, setChatOpenError] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement | null>(null);
   const wsRef = useRef<Socket | null>(null);
@@ -181,6 +194,10 @@ const ChatPage = () => {
   const longPressTimerRef = useRef<number | null>(null);
   const longPressMovedRef = useRef(false);
   const activePointerIdRef = useRef<number | null>(null);
+  const chatLongPressTimerRef = useRef<number | null>(null);
+  const chatLongPressMovedRef = useRef(false);
+  const activeChatPointerIdRef = useRef<number | null>(null);
+  const chatLongPressTriggeredRef = useRef(false);
   const isAtBottomRef = useRef(true);
   const isUserScrollingRef = useRef(false);
   const userScrollIdleTimerRef = useRef<number | null>(null);
@@ -203,12 +220,20 @@ const ChatPage = () => {
     wasAtBottom: boolean;
     lastSenderId: string;
   } | null>(null);
+  const recipientKeyCacheRef = useRef<Record<string, CryptoKey>>({});
+  const activeMessagesLoadRef = useRef(0);
+  const roomMessagesCacheRef = useRef<Record<string, Message[]>>({});
+  const decryptedMessageCacheRef = useRef<Record<string, { cipher: string; text: string }>>({});
+  const pendingOutgoingByRoomRef = useRef<Record<string, Message[]>>({});
+  const deletedChatTombstonesRef = useRef<Record<string, number>>({});
 
   const API_URL = getApiBaseUrl();
   const currentUserId = localStorage.getItem('userId');
   const roomFromQuery = new URLSearchParams(location.search).get('room');
   const userFromQuery = new URLSearchParams(location.search).get('user');
   const currentUserIdStr = String(currentUserId || '');
+  const pinnedStorageKey = `chat:pinned:${currentUserIdStr}`;
+  const mutedStorageKey = `chat:muted:${currentUserIdStr}`;
   const normalizeId = (value: any): string => {
     if (!value) return '';
     if (typeof value === 'string') return value;
@@ -314,9 +339,24 @@ const ChatPage = () => {
     const { scrollTop, scrollHeight, clientHeight } = event.currentTarget;
     const distanceToBottom = scrollHeight - scrollTop - clientHeight;
     isAtBottomRef.current = distanceToBottom <= AUTO_SCROLL_BOTTOM_EPSILON;
+    setShowScrollToBottomButton(distanceToBottom > 220);
     if (focusedMessageId) {
       setFocusedMessageId(null);
     }
+  };
+
+  const mergeServerAndPendingMessages = (chatRoomId: string, serverMessages: Message[]) => {
+    const roomId = String(chatRoomId);
+    const pending = pendingOutgoingByRoomRef.current[roomId] || [];
+    if (!pending.length) return upsertMessagesById(serverMessages);
+    const merged = [...serverMessages];
+    const existingIds = new Set(serverMessages.map((message) => normalizeId(message.id)));
+    for (const pendingMessage of pending) {
+      if (!existingIds.has(normalizeId(pendingMessage.id))) {
+        merged.push(pendingMessage);
+      }
+    }
+    return upsertMessagesById(merged);
   };
 
   const markUserScrolling = () => {
@@ -348,9 +388,59 @@ const ChatPage = () => {
 
   const getInitial = (name?: string) => (name?.charAt(0).toUpperCase() || 'U');
 
+  const isChatPinned = (chatRoomId: string) => pinnedChatIds.includes(String(chatRoomId));
+  const isChatMuted = (chatRoomId: string) => mutedChatIds.includes(String(chatRoomId));
+
+  const togglePinChat = (chatRoomId: string) => {
+    const normalized = String(chatRoomId);
+    setPinnedChatIds((prev) =>
+      prev.includes(normalized) ? prev.filter((id) => id !== normalized) : [normalized, ...prev]
+    );
+    setChatActionSheet(null);
+  };
+
+  const toggleMuteChat = (chatRoomId: string) => {
+    const normalized = String(chatRoomId);
+    setMutedChatIds((prev) =>
+      prev.includes(normalized) ? prev.filter((id) => id !== normalized) : [normalized, ...prev]
+    );
+    setChatActionSheet(null);
+  };
+
+  const openChatRoom = (room: ChatRoom, options?: { pushMobileHistory?: boolean }) => {
+    setChatActionSheet(null);
+    setChatOpenError('');
+    setSelectedChatRoom(room);
+    if (isMobileView) {
+      setShowSidebarOnMobile(false);
+      if (options?.pushMobileHistory !== false) {
+        window.history.pushState({ chatPanel: true, roomId: String(room.chatRoomId) }, '', window.location.href);
+      }
+    }
+  };
+
   const openUserProfile = (userId: string) => {
     if (!userId) return;
     goToProfile(navigate, userId);
+  };
+
+  const resolveChatTargetUserId = async (rawTargetId: string) => {
+    const normalizedTargetId = normalizeId(rawTargetId);
+    if (!normalizedTargetId) return '';
+    const token = localStorage.getItem('token');
+    if (!token) return normalizedTargetId;
+
+    try {
+      const response = await fetch(`${API_URL}/api/profiles/${normalizedTargetId}`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (!response.ok) return normalizedTargetId;
+
+      const data = await response.json().catch(() => ({}));
+      return normalizeId(data?.profile?.userId) || normalizedTargetId;
+    } catch {
+      return normalizedTargetId;
+    }
   };
 
   useEffect(() => {
@@ -370,10 +460,33 @@ const ChatPage = () => {
   }, []);
 
   useEffect(() => {
+    if (!currentUserIdStr) return;
+    try {
+      const savedPinned = JSON.parse(localStorage.getItem(pinnedStorageKey) || '[]');
+      const savedMuted = JSON.parse(localStorage.getItem(mutedStorageKey) || '[]');
+      setPinnedChatIds(Array.isArray(savedPinned) ? savedPinned.map(String) : []);
+      setMutedChatIds(Array.isArray(savedMuted) ? savedMuted.map(String) : []);
+    } catch {
+      setPinnedChatIds([]);
+      setMutedChatIds([]);
+    }
+  }, [currentUserIdStr, pinnedStorageKey, mutedStorageKey]);
+
+  useEffect(() => {
+    localStorage.setItem(pinnedStorageKey, JSON.stringify(pinnedChatIds));
+  }, [pinnedChatIds, pinnedStorageKey]);
+
+  useEffect(() => {
+    localStorage.setItem(mutedStorageKey, JSON.stringify(mutedChatIds));
+  }, [mutedChatIds, mutedStorageKey]);
+
+  useEffect(() => {
     if (selectedChatRoom) {
       forceScrollToBottomRef.current = true;
       isAtBottomRef.current = true;
       initialScrollDoneRef.current = '';
+      const roomId = String(selectedChatRoom.chatRoomId);
+      setMessages(roomMessagesCacheRef.current[roomId] || []);
       setReplyTarget(null);
       replyTargetLockRef.current = null;
       setReactionSheetMessageId(null);
@@ -382,12 +495,37 @@ const ChatPage = () => {
   }, [selectedChatRoom]);
 
   useEffect(() => {
+    const roomId = String(selectedChatRoom?.chatRoomId || '');
+    if (!roomId) return;
+    roomMessagesCacheRef.current[roomId] = messages;
+  }, [messages, selectedChatRoom?.chatRoomId]);
+
+  useEffect(() => {
+    const warmRecipientKey = async () => {
+      const token = localStorage.getItem('token');
+      if (!token || !selectedChatRoom) return;
+      const receiverId = selectedChatRoom.participants.find(
+        (p) => String(p.userId) !== currentUserIdStr
+      )?.userId;
+      if (!receiverId) return;
+      try {
+        await getRecipientPublicKeyCached(receiverId, token);
+      } catch {
+        // ignore key warm-up failures; send path handles fallback/errors
+      }
+    };
+    void warmRecipientKey();
+  }, [selectedChatRoom?.chatRoomId]);
+
+  useEffect(() => {
     const roomIdFromUrl = new URLSearchParams(location.search).get('room');
     const userIdFromUrl = new URLSearchParams(location.search).get('user');
     const normalizedRoomId = normalizeId(roomIdFromUrl);
     const normalizedUserId = normalizeId(userIdFromUrl);
+    const normalizedPathTargetId = normalizeId(friendshipId);
+    const hasDeepLinkTarget = Boolean(normalizedRoomId || normalizedUserId || normalizedPathTargetId);
 
-    if (!normalizedRoomId && !normalizedUserId) {
+    if (!hasDeepLinkTarget) {
       if (isMobileView && !selectedChatRoom) {
         setShowSidebarOnMobile(true);
       }
@@ -401,17 +539,20 @@ const ChatPage = () => {
     if (chatRooms.length > 0) {
       const targetRoom = normalizedRoomId
         ? chatRooms.find((room) => String(room.chatRoomId) === normalizedRoomId)
-        : chatRooms.find((room) =>
-            room.participants.some((participant) => normalizeId(participant.userId) === normalizedUserId)
-          );
+        : chatRooms.find((room) => {
+            const participantIds = room.participants.map((participant) => normalizeId(participant.userId));
+            if (normalizedUserId && participantIds.includes(normalizedUserId)) return true;
+            if (normalizedPathTargetId && participantIds.includes(normalizedPathTargetId)) return true;
+            return false;
+          });
       if (
         targetRoom &&
         String(targetRoom.chatRoomId) !== String(selectedChatRoom?.chatRoomId || '')
       ) {
-        setSelectedChatRoom(targetRoom);
+        openChatRoom(targetRoom, { pushMobileHistory: false });
       }
     }
-  }, [location.search, isMobileView, chatRooms, selectedChatRoom]);
+  }, [location.search, isMobileView, chatRooms, selectedChatRoom, friendshipId]);
 
   useEffect(() => {
     if (!('serviceWorker' in navigator)) return;
@@ -442,7 +583,7 @@ const ChatPage = () => {
 
       const room = chatRooms.find((chat) => String(chat.chatRoomId) === roomIdFromMessage);
       if (room && String(room.chatRoomId) !== String(selectedChatRoom?.chatRoomId || '')) {
-        setSelectedChatRoom(room);
+        openChatRoom(room, { pushMobileHistory: false });
       }
     };
 
@@ -540,12 +681,27 @@ const ChatPage = () => {
   useEffect(() => {
     const closePopups = () => {
       setActionSheet(null);
+      setChatActionSheet(null);
       setShowEmojiPicker(false);
       setReactionSheetMessageId(null);
     };
     document.addEventListener('click', closePopups);
     return () => document.removeEventListener('click', closePopups);
   }, []);
+
+  useEffect(() => {
+    const handlePopState = () => {
+      if (!isMobileView) return;
+      if (showSidebarOnMobile) return;
+      setShowSidebarOnMobile(true);
+      setActionSheet(null);
+      setChatActionSheet(null);
+      setFocusedMessageId(null);
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, [isMobileView, showSidebarOnMobile]);
 
   useEffect(() => {
     const isCallActive = showCallModal && Boolean(currentCall);
@@ -559,13 +715,20 @@ const ChatPage = () => {
     const handleResize = () => {
       const mobile = window.innerWidth <= 768;
       const deepLinkedRoomId = normalizeId(new URLSearchParams(window.location.search).get('room'));
+      const deepLinkedUserId = normalizeId(new URLSearchParams(window.location.search).get('user'));
+      const deepLinkedPathId = normalizeId(friendshipId);
+      const hasDeepLinkTarget = Boolean(deepLinkedRoomId || deepLinkedUserId || deepLinkedPathId);
       setIsMobileView(mobile);
 
       if (!mobile) {
         setShowSidebarOnMobile(true);
-      } else if (deepLinkedRoomId) {
+      } else if (hasDeepLinkTarget) {
         setShowSidebarOnMobile(false);
-      } else if (!selectedChatRoomRef.current) {
+      } else if (selectedChatRoomRef.current && !showSidebarOnMobile) {
+        // Keep chat pane open if user is already in an active conversation view.
+        setShowSidebarOnMobile(false);
+      } else {
+        // Keep sidebar visible while browsing/searching chats.
         setShowSidebarOnMobile(true);
       }
     };
@@ -573,7 +736,7 @@ const ChatPage = () => {
     handleResize();
     window.addEventListener('resize', handleResize);
     return () => window.removeEventListener('resize', handleResize);
-  }, [location.search]);
+  }, [location.search, friendshipId, showSidebarOnMobile]);
 
   useLayoutEffect(() => {
     if (!isMobileView) {
@@ -713,6 +876,10 @@ const ChatPage = () => {
 
     const handleMessageReceive = async (data: any) => {
       console.log('Received message:', data);
+      const incomingRoomId = String(data?.chatRoomId || '');
+      if (incomingRoomId) {
+        delete deletedChatTombstonesRef.current[incomingRoomId];
+      }
 
       try {
         const keyPair = await EncryptionService.getKeyPair();
@@ -739,7 +906,30 @@ const ChatPage = () => {
           }
         }
 
-        loadChatRooms();
+        setChatRooms((prev) => {
+          const idx = prev.findIndex((room) => String(room.chatRoomId) === incomingRoomId);
+          if (idx < 0) {
+            void loadChatRooms();
+            return prev;
+          }
+          const updated = [...prev];
+          const room = updated[idx];
+          const nextRoom: ChatRoom = {
+            ...room,
+            lastMessage: {
+              encryptedContent: String(data.encryptedContent || ''),
+              timestamp: new Date(data.timestamp),
+              senderId: String(data.senderId || '')
+            },
+            lastMessageAt: new Date(data.timestamp),
+            unreadCount:
+              selectedChatRoomRef.current && String(selectedChatRoomRef.current.chatRoomId) === incomingRoomId
+                ? 0
+                : Number(room.unreadCount || 0) + 1
+          };
+          updated[idx] = nextRoom;
+          return updated;
+        });
       } catch (error) {
         if (selectedChatRoomRef.current && data.chatRoomId === selectedChatRoomRef.current.chatRoomId) {
           const unreadableMessage: Message = {
@@ -758,6 +948,21 @@ const ChatPage = () => {
             isAtBottomRef.current = true;
           }
         }
+        setChatRooms((prev) => {
+          const idx = prev.findIndex((room) => String(room.chatRoomId) === incomingRoomId);
+          if (idx < 0) return prev;
+          const updated = [...prev];
+          const room = updated[idx];
+          updated[idx] = {
+            ...room,
+            lastMessageAt: new Date(data.timestamp),
+            unreadCount:
+              selectedChatRoomRef.current && String(selectedChatRoomRef.current.chatRoomId) === incomingRoomId
+                ? 0
+                : Number(room.unreadCount || 0) + 1
+          };
+          return updated;
+        });
       }
     };
 
@@ -853,6 +1058,7 @@ const ChatPage = () => {
 
   const loadChatRooms = async () => {
     try {
+      setChatOpenError('');
       const token = localStorage.getItem('token');
       const response = await fetch(`${API_URL}/api/messages/chats`, {
         headers: { Authorization: `Bearer ${token}` }
@@ -860,9 +1066,12 @@ const ChatPage = () => {
 
       if (response.ok) {
         const data = await response.json();
-        const chats: ChatRoom[] = data.chats || [];
+        const chats: ChatRoom[] = (data.chats || []).filter(
+          (chat: ChatRoom) => !deletedChatTombstonesRef.current[String(chat.chatRoomId)]
+        );
         setChatRooms(chats);
-        await hydrateParticipantPhotos(chats);
+        // Do not block initial chat list render/open on profile photo hydration.
+        void hydrateParticipantPhotos(chats);
         
         // If room query is provided, select that exact chat first.
         const normalizedRoomId = normalizeId(
@@ -872,10 +1081,9 @@ const ChatPage = () => {
           new URLSearchParams(window.location.search).get('user') || userFromQuery
         );
         if (normalizedRoomId && chats.length > 0) {
-          const room = chats.find((c: ChatRoom) => String(c.chatRoomId) === normalizedRoomId);
-          if (room) {
-            setSelectedChatRoom(room);
-            setShowSidebarOnMobile(false);
+      const room = chats.find((c: ChatRoom) => String(c.chatRoomId) === normalizedRoomId);
+      if (room) {
+            openChatRoom(room, { pushMobileHistory: false });
             console.log('[ChatPage] Selected room from deep link after chats load:', normalizedRoomId);
             return;
           }
@@ -890,8 +1098,7 @@ const ChatPage = () => {
           );
           if (roomByUser) {
             openedUserQueryRef.current = '';
-            setSelectedChatRoom(roomByUser);
-            setShowSidebarOnMobile(false);
+            openChatRoom(roomByUser, { pushMobileHistory: false });
             return;
           }
           if (openedUserQueryRef.current === normalizedUserId) {
@@ -904,18 +1111,19 @@ const ChatPage = () => {
 
         // If friendshipId is provided, select by participant user id.
         if (friendshipId && chats.length > 0) {
-          const targetId = normalizeId(friendshipId);
+          const directTargetId = normalizeId(friendshipId);
+          const resolvedTargetId = await resolveChatTargetUserId(directTargetId);
           const chat = chats.find((c: ChatRoom) =>
-            c.participants.some((p) => normalizeId(p.userId) === targetId)
+            c.participants.some((p) => normalizeId(p.userId) === resolvedTargetId)
           );
           if (chat) {
-            setSelectedChatRoom(chat);
-            if (isMobileView) setShowSidebarOnMobile(false);
+            openChatRoom(chat, { pushMobileHistory: false });
           } else {
-            await openDirectChat(targetId);
+            await openDirectChat(resolvedTargetId);
           }
         } else if (friendshipId && chats.length === 0) {
-          await openDirectChat(normalizeId(friendshipId));
+          const resolvedTargetId = await resolveChatTargetUserId(normalizeId(friendshipId));
+          await openDirectChat(resolvedTargetId);
         }
       }
     } catch (error) {
@@ -925,21 +1133,28 @@ const ChatPage = () => {
     }
   };
 
-  const openDirectChat = async (targetUserId: string) => {
+  const openDirectChat = async (targetUserId: string): Promise<boolean> => {
     try {
       const token = localStorage.getItem('token');
       const normalizedTargetUserId = normalizeId(targetUserId);
-      if (!token || !normalizedTargetUserId) return;
+      if (!token || !normalizedTargetUserId) return false;
 
       const response = await fetch(`${API_URL}/api/messages/open/${normalizedTargetUserId}`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` }
       });
 
-      if (!response.ok) return;
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        setChatOpenError(errorData?.error?.message || 'Unable to open this chat right now.');
+        return false;
+      }
       const data = await response.json();
       const openedChat = data?.chat;
-      if (!openedChat) return;
+      if (!openedChat) {
+        setChatOpenError('Unable to open this chat right now.');
+        return false;
+      }
 
       setChatRooms((prev) => {
         const exists = prev.some((room) => String(room.chatRoomId) === String(openedChat.chatRoomId));
@@ -947,12 +1162,15 @@ const ChatPage = () => {
         return [openedChat, ...prev];
       });
 
-      await hydrateParticipantPhotos([openedChat]);
-      setSelectedChatRoom(openedChat);
+      void hydrateParticipantPhotos([openedChat]);
+      openChatRoom(openedChat, { pushMobileHistory: false });
       openedUserQueryRef.current = '';
-      if (isMobileView) setShowSidebarOnMobile(false);
+      setChatOpenError('');
+      return true;
     } catch (error) {
       console.error('Failed to open direct chat:', error);
+      setChatOpenError('Unable to open this chat right now.');
+      return false;
     }
   };
 
@@ -998,6 +1216,7 @@ const ChatPage = () => {
   };
 
   const loadMessages = async (chatRoomId: string) => {
+    const loadId = ++activeMessagesLoadRef.current;
     try {
       const token = localStorage.getItem('token');
       const response = await fetch(`${API_URL}/api/messages/chat/${chatRoomId}`, {
@@ -1005,6 +1224,7 @@ const ChatPage = () => {
       });
 
       if (response.ok) {
+        if (loadId !== activeMessagesLoadRef.current) return;
         const data = await response.json();
         
         // Decrypt all messages
@@ -1015,10 +1235,19 @@ const ChatPage = () => {
               if (msg.deletedForEveryone) {
                 return { ...msg, encryptedContent: DELETED_MESSAGE_TEXT, deletedForEveryone: true };
               }
+              const normalizedMessageId = normalizeId(msg.id);
+              const cacheEntry = decryptedMessageCacheRef.current[normalizedMessageId];
+              if (cacheEntry && cacheEntry.cipher === msg.encryptedContent) {
+                return { ...msg, encryptedContent: cacheEntry.text };
+              }
               const decryptedContent = await EncryptionService.decryptMessage(
                 msg.encryptedContent,
                 keyPair.privateKey
               );
+              decryptedMessageCacheRef.current[normalizedMessageId] = {
+                cipher: msg.encryptedContent,
+                text: decryptedContent
+              };
               return { ...msg, encryptedContent: decryptedContent };
             } catch {
               if (msg.deletedForEveryone) {
@@ -1028,13 +1257,16 @@ const ChatPage = () => {
             }
           })
         );
+        if (loadId !== activeMessagesLoadRef.current) return;
         const normalizedRoomId = normalizeId(chatRoomId);
         const isFirstLoadForRoom = initialScrollDoneRef.current !== normalizedRoomId;
         if (isFirstLoadForRoom) {
           forceScrollToBottomRef.current = true;
           isAtBottomRef.current = true;
         }
-        setMessages(upsertMessagesById(decryptedMessages));
+        const mergedMessages = mergeServerAndPendingMessages(chatRoomId, decryptedMessages);
+        setMessages(mergedMessages);
+        roomMessagesCacheRef.current[String(chatRoomId)] = mergedMessages;
         if (isFirstLoadForRoom) {
           initialScrollDoneRef.current = normalizedRoomId;
         }
@@ -1052,13 +1284,28 @@ const ChatPage = () => {
     }
   };
 
+  const getRecipientPublicKeyCached = async (receiverId: string, token: string) => {
+    const cacheKey = normalizeId(receiverId);
+    const cached = recipientKeyCacheRef.current[cacheKey];
+    if (cached) return cached;
+    const publicKey = await EncryptionService.getRecipientPublicKey(
+      receiverId,
+      API_URL,
+      token
+    );
+    recipientKeyCacheRef.current[cacheKey] = publicKey;
+    return publicKey;
+  };
+
   const sendMessage = async () => {
     const sanitizedMessage = messageInput.trim();
-    if (!sanitizedMessage || !selectedChatRoom || sending || !encryptionReady) return;
+    if (!sanitizedMessage || !selectedChatRoom || !encryptionReady) return;
     const replyContext = replyTarget;
 
     triggerHaptic(50);
     setSending(true);
+    const tempMessageId = `temp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const roomId = String(selectedChatRoom.chatRoomId);
     try {
       const token = localStorage.getItem('token');
       const receiverId = selectedChatRoom.participants.find(
@@ -1070,14 +1317,49 @@ const ChatPage = () => {
         return;
       }
 
+      const optimisticMessage: Message = {
+        id: tempMessageId,
+        senderId: currentUserId!,
+        receiverId,
+        encryptedContent: sanitizedMessage,
+        replyToMessageId: replyContext?.messageId || null,
+        timestamp: new Date(),
+        delivered: false,
+        read: false,
+        deletedForEveryone: false,
+        reactions: []
+      };
+      pendingOutgoingByRoomRef.current[roomId] = [
+        ...(pendingOutgoingByRoomRef.current[roomId] || []).filter(
+          (message) => normalizeId(message.id) !== tempMessageId
+        ),
+        optimisticMessage
+      ];
+      appendMessageDedup(optimisticMessage);
+      setMessageInput('');
+      setReplyTarget(null);
+      replyTargetLockRef.current = null;
+      setShowEmojiPicker(false);
+      forceScrollToBottom();
+      if (messageInputRef.current) {
+        messageInputRef.current.style.height = 'auto';
+        messageInputRef.current.focus();
+      }
+      emitTypingState(false);
+      if (typingStopTimeoutRef.current) {
+        window.clearTimeout(typingStopTimeoutRef.current);
+        typingStopTimeoutRef.current = null;
+      }
+      setIsPeerTyping(false);
+      setSending(false);
+
       // Encrypt for receiver and sender (sender must read own history later).
       let encryptedContent: string;
       let senderEncryptedContent: string;
       try {
         const keyPair = await EncryptionService.getKeyPair();
-        const recipientPublicKey = await EncryptionService.getRecipientPublicKey(
+        const recipientPublicKey = await getRecipientPublicKeyCached(
           receiverId,
-          API_URL,
           token!
         );
         encryptedContent = await EncryptionService.encryptMessage(
@@ -1111,46 +1393,37 @@ const ChatPage = () => {
 
       if (response.ok) {
         const data = await response.json();
-        
-        // Add message to local state (store decrypted version locally)
-        const newMessage: Message = {
-          id: normalizeId(data.messageData.id),
-          senderId: currentUserId!,
-          receiverId,
-          encryptedContent: sanitizedMessage, // Store decrypted for display
-          replyToMessageId: replyContext?.messageId || null,
-          timestamp: new Date(data.messageData.timestamp),
-          delivered: Boolean(data.messageData.delivered),
-          read: false,
-          deletedForEveryone: false,
-          reactions: []
-        };
-        forceScrollToBottom();
-        appendMessageDedup(newMessage);
-        setMessageInput('');
-        setReplyTarget(null);
-        replyTargetLockRef.current = null;
-        setShowEmojiPicker(false);
+        const realMessageId = normalizeId(data.messageData.id);
+        pendingOutgoingByRoomRef.current[roomId] = (pendingOutgoingByRoomRef.current[roomId] || []).filter(
+          (message) => normalizeId(message.id) !== tempMessageId
+        );
+        setMessages((prev) =>
+          prev.map((message) =>
+            normalizeId(message.id) === tempMessageId
+              ? {
+                  ...message,
+                  id: realMessageId,
+                  timestamp: new Date(data.messageData.timestamp),
+                  delivered: Boolean(data.messageData.delivered)
+                }
+              : message
+          )
+        );
         setActionSheet(null);
-        if (messageInputRef.current) {
-          messageInputRef.current.style.height = 'auto';
-          messageInputRef.current.focus();
-          window.requestAnimationFrame(() => {
-            messageInputRef.current?.focus();
-          });
-        }
-        emitTypingState(false);
-        if (typingStopTimeoutRef.current) {
-          window.clearTimeout(typingStopTimeoutRef.current);
-          typingStopTimeoutRef.current = null;
-        }
-        setIsPeerTyping(false);
       } else {
+        pendingOutgoingByRoomRef.current[roomId] = (pendingOutgoingByRoomRef.current[roomId] || []).filter(
+          (message) => normalizeId(message.id) !== tempMessageId
+        );
+        setMessages((prev) => prev.filter((message) => normalizeId(message.id) !== tempMessageId));
         const error = await response.json();
         alert(error.error?.message || 'Failed to send message');
       }
     } catch (error) {
       console.error('Failed to send message:', error);
+      pendingOutgoingByRoomRef.current[roomId] = (pendingOutgoingByRoomRef.current[roomId] || []).filter(
+        (message) => normalizeId(message.id) !== tempMessageId
+      );
+      setMessages((prev) => prev.filter((message) => normalizeId(message.id) !== tempMessageId));
       alert('Failed to send message');
     } finally {
       setSending(false);
@@ -1358,6 +1631,14 @@ const ChatPage = () => {
     [actionSheet, messages]
   );
   const myReactionOnActionSheetMessage = actionSheetMessage ? myReactionForMessage(actionSheetMessage) : '';
+  const actionSheetMessageIsDeletedForEveryone = Boolean(actionSheetMessage?.deletedForEveryone);
+  const actionSheetCanDeleteForEveryone = Boolean(actionSheet?.isOwn && !actionSheetMessageIsDeletedForEveryone);
+  const actionSheetCanCopy = Boolean(
+    actionSheetMessage &&
+    !actionSheetMessageIsDeletedForEveryone &&
+    String(actionSheetMessage.encryptedContent || '').trim().length > 0 &&
+    String(actionSheetMessage.encryptedContent || '').trim() !== DELETED_MESSAGE_TEXT
+  );
 
   const getReplyPreviewForMessage = (message: Message) => {
     const replyId = normalizeId(message.replyToMessageId);
@@ -1426,15 +1707,28 @@ const ChatPage = () => {
     const container = messagesContainerRef.current;
     if (container) {
       container.scrollTop = container.scrollHeight;
+      setShowScrollToBottomButton(false);
       return;
     }
     messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
+    setShowScrollToBottomButton(false);
   };
 
   const forceScrollToBottom = () => {
     forceScrollToBottomRef.current = true;
     isAtBottomRef.current = true;
+    setShowScrollToBottomButton(false);
     requestAnimationFrame(() => scrollToBottom());
+  };
+
+  const scrollToLatestMessage = () => {
+    const container = messagesContainerRef.current;
+    if (container) {
+      container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
+    } else {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+    setShowScrollToBottomButton(false);
   };
 
   const handleChatContainerPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -1544,11 +1838,26 @@ const ChatPage = () => {
     setCurrentCall(null);
   };
 
-  const filteredChatRooms = chatRooms.filter((room) => {
-    const other = getOtherParticipant(room);
-    const haystack = `${other?.name || ''} ${other?.profession || ''}`.toLowerCase();
-    return haystack.includes(chatSearch.toLowerCase());
-  });
+  const filteredChatRooms = useMemo(() => {
+    const query = chatSearch.toLowerCase();
+    const filtered = chatRooms.filter((room) => {
+      const other = getOtherParticipant(room);
+      const haystack = `${other?.name || ''} ${other?.profession || ''}`.toLowerCase();
+      return haystack.includes(query);
+    });
+
+    return filtered.sort((a, b) => {
+      const aPinned = isChatPinned(a.chatRoomId) ? 1 : 0;
+      const bPinned = isChatPinned(b.chatRoomId) ? 1 : 0;
+      if (aPinned !== bPinned) return bPinned - aPinned;
+      if (aPinned && bPinned) {
+        const aPinIndex = pinnedChatIds.indexOf(String(a.chatRoomId));
+        const bPinIndex = pinnedChatIds.indexOf(String(b.chatRoomId));
+        if (aPinIndex !== bPinIndex) return aPinIndex - bPinIndex;
+      }
+      return new Date(b.lastMessageAt).getTime() - new Date(a.lastMessageAt).getTime();
+    });
+  }, [chatRooms, chatSearch, pinnedChatIds]);
 
   const selectedOtherParticipant = selectedChatRoom
     ? selectedChatRoom.participants.find((p) => String(p.userId) !== currentUserIdStr)
@@ -1575,7 +1884,7 @@ const ChatPage = () => {
     );
 
     const spaceBelow = viewportHeight - rect.bottom;
-    const sheetHeightEstimate = 188;
+    const sheetHeightEstimate = 280;
     const alignY: 'above' | 'below' = spaceBelow < sheetHeightEstimate ? 'above' : 'below';
     const y = alignY === 'above' ? rect.top - 8 : rect.bottom + 8;
 
@@ -1587,18 +1896,52 @@ const ChatPage = () => {
     };
   };
 
+  const buildChatActionSheetPosition = (rect: DOMRect) => {
+    const viewportWidth = window.innerWidth;
+    const x = Math.max(
+      ACTION_SHEET_MARGIN,
+      Math.min(rect.left, viewportWidth - CHAT_ACTION_SHEET_WIDTH - ACTION_SHEET_MARGIN)
+    );
+    const y = rect.bottom + 8;
+    return { x, y };
+  };
+
   const openActionSheetFromRect = (rect: DOMRect, message: Message, isOwnMessage: boolean) => {
-    if (message.deletedForEveryone) return;
     const position = buildActionSheetPosition(rect, isOwnMessage);
     setActionSheet({
       messageId: String(message.id),
       isOwn: isOwnMessage,
       ...position
     });
+    setChatActionSheet(null);
+    setShowEmojiPicker(false);
+  };
+
+  const openChatActionSheetFromRect = (rect: DOMRect, chatRoomId: string) => {
+    const position = buildChatActionSheetPosition(rect);
+    setChatActionSheet({
+      chatRoomId,
+      ...position
+    });
+    setActionSheet(null);
+    setFocusedMessageId(null);
     setShowEmojiPicker(false);
   };
 
   const handleMessageContextMenu = (
+    event: React.MouseEvent<HTMLDivElement>,
+    message: Message,
+    isOwnMessage: boolean
+  ) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const messageId = normalizeId(message.id);
+    setFocusedMessageId(messageId);
+    const rect = (event.currentTarget as HTMLDivElement).getBoundingClientRect();
+    openActionSheetFromRect(rect, message, isOwnMessage);
+  };
+
+  const handleMessageClick = (
     event: React.MouseEvent<HTMLDivElement>,
     message: Message,
     isOwnMessage: boolean
@@ -1627,7 +1970,7 @@ const ChatPage = () => {
       setFocusedMessageId(messageId);
       const rect = target.getBoundingClientRect();
       openActionSheetFromRect(rect, message, isOwnMessage);
-    }, 500);
+    }, LONG_PRESS_DURATION_MS);
   };
 
   const cancelMessageLongPress = () => {
@@ -1644,6 +1987,67 @@ const ChatPage = () => {
     if (Math.abs(event.movementX) > 6 || Math.abs(event.movementY) > 6) {
       longPressMovedRef.current = true;
       cancelMessageLongPress();
+    }
+  };
+
+  const prepareReplyFromMessage = (message: Message) => {
+    const messageId = normalizeId(message.id);
+    const senderName = normalizeId(message.senderId) === currentUserIdStr ? 'You' : getParticipantName(String(message.senderId));
+    const safeText = String(message.encryptedContent || '').replace(/\s+/g, ' ').trim().slice(0, PREVIEW_REPLY_CHARS);
+    const nextReplyTarget: ReplyTarget = {
+      messageId,
+      senderId: normalizeId(message.senderId),
+      senderName,
+      text: safeText || DELETED_MESSAGE_TEXT,
+      isOwn: normalizeId(message.senderId) === currentUserIdStr
+    };
+    setReplyTarget(nextReplyTarget);
+    replyTargetLockRef.current = nextReplyTarget;
+    messageInputRef.current?.focus();
+  };
+
+  const handleChatContextMenu = (
+    event: React.MouseEvent<HTMLDivElement>,
+    chatRoomId: string
+  ) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const rect = (event.currentTarget as HTMLDivElement).getBoundingClientRect();
+    openChatActionSheetFromRect(rect, chatRoomId);
+  };
+
+  const startChatLongPress = (
+    event: React.PointerEvent<HTMLDivElement>,
+    chatRoomId: string
+  ) => {
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
+    chatLongPressTriggeredRef.current = false;
+    chatLongPressMovedRef.current = false;
+    activeChatPointerIdRef.current = event.pointerId;
+    const target = event.currentTarget;
+    chatLongPressTimerRef.current = window.setTimeout(() => {
+      chatLongPressTimerRef.current = null;
+      if (chatLongPressMovedRef.current) return;
+      chatLongPressTriggeredRef.current = true;
+      const rect = target.getBoundingClientRect();
+      openChatActionSheetFromRect(rect, chatRoomId);
+    }, LONG_PRESS_DURATION_MS);
+  };
+
+  const cancelChatLongPress = () => {
+    if (chatLongPressTimerRef.current !== null) {
+      window.clearTimeout(chatLongPressTimerRef.current);
+      chatLongPressTimerRef.current = null;
+    }
+    activeChatPointerIdRef.current = null;
+  };
+
+  const moveChatLongPress = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (activeChatPointerIdRef.current === null) return;
+    if (event.pointerId !== activeChatPointerIdRef.current) return;
+    if (Math.abs(event.movementX) > 6 || Math.abs(event.movementY) > 6) {
+      chatLongPressMovedRef.current = true;
+      cancelChatLongPress();
     }
   };
 
@@ -1705,24 +2109,8 @@ const ChatPage = () => {
     if (Math.abs(diffY) > 42) return;
     if (diffX < SWIPE_REPLY_THRESHOLD) return;
 
-    const senderName = normalizeId(message.senderId) === currentUserIdStr ? 'You' : getParticipantName(String(message.senderId));
-    const safeText = String(message.encryptedContent || '').replace(/\s+/g, ' ').trim().slice(0, PREVIEW_REPLY_CHARS);
-    setReplyTarget({
-      messageId,
-      senderId: normalizeId(message.senderId),
-      senderName,
-      text: safeText,
-      isOwn: normalizeId(message.senderId) === currentUserIdStr
-    });
-    replyTargetLockRef.current = {
-      messageId,
-      senderId: normalizeId(message.senderId),
-      senderName,
-      text: safeText,
-      isOwn: normalizeId(message.senderId) === currentUserIdStr
-    };
+    prepareReplyFromMessage(message);
     triggerHaptic([30, 50, 30]);
-    messageInputRef.current?.focus();
   };
 
   const scrollToQuotedMessage = (replyToMessageId?: string | null) => {
@@ -1759,7 +2147,94 @@ const ChatPage = () => {
       console.error('Delete for me failed:', error);
     } finally {
       setActionSheet(null);
+      setFocusedMessageId(null);
     }
+  };
+
+  const deleteChatForMe = async (chatRoomId: string) => {
+    const prevChatRooms = chatRooms;
+    const normalizedRoomId = String(chatRoomId);
+    deletedChatTombstonesRef.current[normalizedRoomId] = Date.now();
+    const wasSelected = String(selectedChatRoomRef.current?.chatRoomId || '') === String(chatRoomId);
+    setChatRooms((prev) => prev.filter((room) => String(room.chatRoomId) !== String(chatRoomId)));
+    setPinnedChatIds((prev) => prev.filter((id) => id !== normalizedRoomId));
+    setMutedChatIds((prev) => prev.filter((id) => id !== normalizedRoomId));
+    setChatActionSheet(null);
+
+    if (wasSelected) {
+      setSelectedChatRoom(null);
+      selectedChatRoomRef.current = null;
+      setMessages([]);
+      setReplyTarget(null);
+      replyTargetLockRef.current = null;
+      if (isMobileView) setShowSidebarOnMobile(true);
+    }
+
+    try {
+      const token = localStorage.getItem('token');
+      const response = await fetch(`${API_URL}/api/messages/chats/${chatRoomId}/me`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (!response.ok) {
+        delete deletedChatTombstonesRef.current[normalizedRoomId];
+        setChatRooms(prevChatRooms);
+        if (wasSelected && prevChatRooms.length > 0) {
+          const restored = prevChatRooms.find((room) => String(room.chatRoomId) === String(chatRoomId)) || null;
+          setSelectedChatRoom(restored);
+          selectedChatRoomRef.current = restored;
+          if (isMobileView) setShowSidebarOnMobile(false);
+        }
+      }
+    } catch (error) {
+      console.error('Delete chat failed:', error);
+      delete deletedChatTombstonesRef.current[normalizedRoomId];
+      setChatRooms(prevChatRooms);
+      if (wasSelected && prevChatRooms.length > 0) {
+        const restored = prevChatRooms.find((room) => String(room.chatRoomId) === String(chatRoomId)) || null;
+        setSelectedChatRoom(restored);
+        selectedChatRoomRef.current = restored;
+        if (isMobileView) setShowSidebarOnMobile(false);
+      }
+    }
+  };
+
+  const copyMessageFromActionSheet = async () => {
+    if (!actionSheetMessage) return;
+    const textToCopy = String(actionSheetMessage.encryptedContent || '').trim();
+    if (!textToCopy) {
+      setActionSheet(null);
+      setFocusedMessageId(null);
+      return;
+    }
+
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(textToCopy);
+      } else {
+        const textarea = document.createElement('textarea');
+        textarea.value = textToCopy;
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.focus();
+        textarea.select();
+        document.execCommand('copy');
+        textarea.remove();
+      }
+    } catch (error) {
+      console.error('Copy message failed:', error);
+    } finally {
+      setActionSheet(null);
+      setFocusedMessageId(null);
+    }
+  };
+
+  const replyFromActionSheet = () => {
+    if (!actionSheetMessage) return;
+    prepareReplyFromMessage(actionSheetMessage);
+    setActionSheet(null);
+    setFocusedMessageId(null);
   };
 
   const deleteForEveryone = async () => {
@@ -1784,6 +2259,7 @@ const ChatPage = () => {
       console.error('Delete for everyone failed:', error);
     } finally {
       setActionSheet(null);
+      setFocusedMessageId(null);
     }
   };
 
@@ -1801,6 +2277,7 @@ const ChatPage = () => {
               <BackArrowIcon />
             </button>
             <h2>Messages</h2>
+            <span className="chat-list-header-spacer" aria-hidden="true" />
             <input
               className="chat-search-input"
               type="text"
@@ -1822,14 +2299,25 @@ const ChatPage = () => {
                   p => String(p.userId) !== currentUserIdStr
                 );
                 const isSelected = selectedChatRoom?.chatRoomId === room.chatRoomId;
+                const isPinned = isChatPinned(room.chatRoomId);
+                const isMuted = isChatMuted(room.chatRoomId);
 
                 return (
                   <div
                     key={room.chatRoomId}
-                    className={`chat-list-item ${isSelected ? 'selected' : ''}`}
+                    className={`chat-list-item ${isSelected ? 'selected' : ''} ${isPinned ? 'is-pinned' : ''}`}
+                    onContextMenu={(e) => handleChatContextMenu(e, room.chatRoomId)}
+                    onPointerDown={(e) => startChatLongPress(e, room.chatRoomId)}
+                    onPointerUp={cancelChatLongPress}
+                    onPointerLeave={cancelChatLongPress}
+                    onPointerCancel={cancelChatLongPress}
+                    onPointerMove={moveChatLongPress}
                     onClick={() => {
-                      setSelectedChatRoom(room);
-                      if (isMobileView) setShowSidebarOnMobile(false);
+                      if (chatLongPressTriggeredRef.current) {
+                        chatLongPressTriggeredRef.current = false;
+                        return;
+                      }
+                      openChatRoom(room, { pushMobileHistory: true });
                     }}
                   >
                     <div className="chat-avatar-btn" aria-hidden="true">
@@ -1849,8 +2337,15 @@ const ChatPage = () => {
                           <span className="chat-name-link">
                             {otherParticipant?.name || 'Unknown'}
                           </span>
-                          {otherParticipant?.profession && (
-                            <span className="chat-name-profession">{` • ${otherParticipant.profession}`}</span>
+                          {isPinned && (
+                            <span className="chat-chip pin-chip" aria-label="Pinned chat" title="Pinned">
+                              📌
+                            </span>
+                          )}
+                          {isMuted && (
+                            <span className="chat-chip mute-chip" aria-label="Muted chat" title="Muted">
+                              🔕
+                            </span>
                           )}
                         </h3>
                         {room.lastMessage && (
@@ -1892,7 +2387,13 @@ const ChatPage = () => {
                   {isMobileView && (
                     <button
                       className="back-to-chats-button"
-                      onClick={() => setShowSidebarOnMobile(true)}
+                      onClick={() => {
+                        if (window.history.state?.chatPanel) {
+                          window.history.back();
+                        } else {
+                          setShowSidebarOnMobile(true);
+                        }
+                      }}
                       aria-label="Back to chats"
                     >
                       <BackArrowIcon />
@@ -1955,7 +2456,7 @@ const ChatPage = () => {
               </div>
 
               <div
-                className="messages-container"
+                className={`messages-container ${focusedMessageId ? 'blur-others' : ''}`}
                 ref={messagesContainerRef}
                 onScroll={handleMessagesScroll}
                 onWheel={markUserScrolling}
@@ -2013,6 +2514,7 @@ const ChatPage = () => {
                                     : 'transform 0.2s ease-out'
                             }}
                             onContextMenu={(e) => handleMessageContextMenu(e, message, isOwnMessage)}
+                            onClick={(e) => handleMessageClick(e, message, isOwnMessage)}
                             onPointerDown={(e) => startMessageLongPress(e, message, isOwnMessage)}
                             onPointerUp={cancelMessageLongPress}
                             onPointerLeave={cancelMessageLongPress}
@@ -2079,6 +2581,16 @@ const ChatPage = () => {
                 })}
                 <div ref={messagesEndRef} />
               </div>
+              {showScrollToBottomButton && (
+                <button
+                  type="button"
+                  className="scroll-to-latest-btn"
+                  onClick={scrollToLatestMessage}
+                  aria-label="Scroll to latest messages"
+                >
+                  ↓
+                </button>
+              )}
 
               <div className="message-input-container">
                 {replyTarget && (
@@ -2202,12 +2714,13 @@ const ChatPage = () => {
           ) : (
             <div className="no-chat-selected">
               <p>Select a chat to start messaging</p>
+              {chatOpenError && <p>{chatOpenError}</p>}
             </div>
           )}
         </div>
       </div>
 
-      {focusedMessageId && (
+      {(focusedMessageId || chatActionSheet) && (
         <div
           className="chat-focus-overlay"
           onPointerDown={(event) => {
@@ -2215,6 +2728,7 @@ const ChatPage = () => {
             event.stopPropagation();
             setFocusedMessageId(null);
             setActionSheet(null);
+            setChatActionSheet(null);
           }}
         />
       )}
@@ -2240,6 +2754,25 @@ const ChatPage = () => {
           style={{ left: `${actionSheet.x}px`, top: `${actionSheet.y}px` }}
           onClick={(e) => e.stopPropagation()}
         >
+          <button className="context-item" onClick={replyFromActionSheet}>
+            Reply
+          </button>
+          {actionSheetCanCopy && (
+            <button className="context-item" onClick={copyMessageFromActionSheet}>
+              Copy
+            </button>
+          )}
+          <button className="context-item" onClick={deleteForMe}>
+            Delete for me
+          </button>
+          {actionSheetCanDeleteForEveryone && (
+            <button
+              className="context-item danger"
+              onClick={deleteForEveryone}
+            >
+              Delete for everyone
+            </button>
+          )}
           <div className="reaction-row" role="group" aria-label="React to message">
             {MESSAGE_REACTION_OPTIONS.map((emoji) => (
               <button
@@ -2253,18 +2786,32 @@ const ChatPage = () => {
               </button>
             ))}
           </div>
-          {myReactionOnActionSheetMessage && (
-            <button className="context-item" onClick={(e) => removeReaction(actionSheet.messageId, e)}>
-              Remove my reaction
-            </button>
-          )}
-          {actionSheet.isOwn && (
-            <button className="context-item danger" onClick={deleteForEveryone}>
-              Delete for everyone
-            </button>
-          )}
-          <button className="context-item" onClick={deleteForMe}>
-            Delete for me
+        </div>
+      )}
+
+      {chatActionSheet && (
+        <div
+          className="message-action-sheet chat-action-sheet"
+          style={{ left: `${chatActionSheet.x}px`, top: `${chatActionSheet.y}px`, width: `${CHAT_ACTION_SHEET_WIDTH}px` }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button
+            className="context-item danger"
+            onClick={() => deleteChatForMe(chatActionSheet.chatRoomId)}
+          >
+            Delete chat
+          </button>
+          <button
+            className="context-item"
+            onClick={() => togglePinChat(chatActionSheet.chatRoomId)}
+          >
+            {isChatPinned(chatActionSheet.chatRoomId) ? 'Unpin' : 'Pin'}
+          </button>
+          <button
+            className="context-item"
+            onClick={() => toggleMuteChat(chatActionSheet.chatRoomId)}
+          >
+            {isChatMuted(chatActionSheet.chatRoomId) ? 'Unmute messages' : 'Mute messages'}
           </button>
         </div>
       )}
