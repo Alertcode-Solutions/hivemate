@@ -17,6 +17,10 @@
   letter-spacing: 0.01em;
 }
 
+.loading-dots--nowrap .loading-dots__label {
+  white-space: nowrap;
+}
+
 .loading-dots__trail {
   display: inline-flex;
   gap: 0.28rem;

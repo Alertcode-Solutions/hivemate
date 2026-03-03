@@ -37,6 +37,8 @@ interface SelectedRadarUser {
   photo?: string;
 }
 
+type RadarLoadPhase = 'starting' | 'searching' | 'ready';
+
 const RADAR_SCAN_CYCLE_MS = 700;
 const SCROLL_LOG_THROTTLE_MS = 180;
 const RADAR_RESPONSE_CACHE_TTL_MS = 8000;
@@ -84,6 +86,9 @@ const RadarView = () => {
   const [selectedUser, setSelectedUser] = useState<SelectedRadarUser | null>(null);
   const [focusedUserId, setFocusedUserId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [isNearbyRefreshing, setIsNearbyRefreshing] = useState(false);
+  const [hasFetchedNearbyOnce, setHasFetchedNearbyOnce] = useState(false);
+  const [radarLoadPhase, setRadarLoadPhase] = useState<RadarLoadPhase>('starting');
   const [, setLocationIssue] = useState<string>('');
   const [showFilters, setShowFilters] = useState(false);
   const [hoverLabel, setHoverLabel] = useState<HoverLabel | null>(null);
@@ -113,6 +118,8 @@ const RadarView = () => {
   const filteredCountRef = useRef(filteredUsers.length);
   const nearbyFetchAbortRef = useRef<AbortController | null>(null);
   const nearbyResponseCacheRef = useRef<Map<string, { at: number; users: RadarDot[] }>>(new Map());
+  const nearbyFetchRequestIdRef = useRef(0);
+  const distanceFetchDebounceRef = useRef<number | null>(null);
 
   const API_URL = getApiBaseUrl();
   const handleUnauthorized = () => {
@@ -487,19 +494,32 @@ const RadarView = () => {
     window.addEventListener('hivemate:radar-refresh', onRadarRefresh as EventListener);
 
     if (visibilityMode === 'explore' && userLocationRef.current) {
-      syncRadarData();
+      if (distanceFetchDebounceRef.current !== null) {
+        window.clearTimeout(distanceFetchDebounceRef.current);
+      }
+      distanceFetchDebounceRef.current = window.setTimeout(() => {
+        syncRadarData();
+        distanceFetchDebounceRef.current = null;
+      }, 220);
     }
 
     return () => {
       window.removeEventListener('hivemate:radar-refresh', onRadarRefresh as EventListener);
+      if (distanceFetchDebounceRef.current !== null) {
+        window.clearTimeout(distanceFetchDebounceRef.current);
+        distanceFetchDebounceRef.current = null;
+      }
     };
   }, [visibilityMode, distanceRange]);
 
   useEffect(() => {
     if (visibilityMode !== 'explore') {
       hasExploreBootstrappedRef.current = false;
+      setHasFetchedNearbyOnce(false);
+      setRadarLoadPhase('ready');
       return;
     }
+    setRadarLoadPhase('starting');
     if (hasExploreBootstrappedRef.current) return;
     hasExploreBootstrappedRef.current = true;
 
@@ -577,6 +597,10 @@ const RadarView = () => {
   useEffect(() => {
     return () => {
       nearbyFetchAbortRef.current?.abort();
+      if (distanceFetchDebounceRef.current !== null) {
+        window.clearTimeout(distanceFetchDebounceRef.current);
+        distanceFetchDebounceRef.current = null;
+      }
     };
   }, []);
 
@@ -591,8 +615,15 @@ const RadarView = () => {
     const now = Date.now();
     if (cached && now - cached.at < RADAR_RESPONSE_CACHE_TTL_MS) {
       setNearbyUsers(cached.users);
+      setHasFetchedNearbyOnce(true);
+      setRadarLoadPhase('ready');
+      setIsNearbyRefreshing(false);
       return;
     }
+
+    const requestId = ++nearbyFetchRequestIdRef.current;
+    setRadarLoadPhase('searching');
+    setIsNearbyRefreshing(true);
 
     if (!options.silent) {
       setLoading(true);
@@ -629,6 +660,7 @@ const RadarView = () => {
         }));
         nearbyResponseCacheRef.current.set(cacheKey, { at: now, users: mappedUsers });
         setNearbyUsers(mappedUsers);
+        setHasFetchedNearbyOnce(true);
       } else if (response.status === 401) {
         handleUnauthorized();
       }
@@ -642,8 +674,12 @@ const RadarView = () => {
         silent: Boolean(options.silent)
       });
     } finally {
-      if (!options.silent) {
+      if (!options.silent && requestId === nearbyFetchRequestIdRef.current) {
         setLoading(false);
+      }
+      if (requestId === nearbyFetchRequestIdRef.current) {
+        setIsNearbyRefreshing(false);
+        setRadarLoadPhase('ready');
       }
     }
   };
@@ -704,6 +740,7 @@ const RadarView = () => {
     }
 
     locationRequestInFlightRef.current = true;
+    setRadarLoadPhase('starting');
     try {
       const freshLocation = await requestCurrentLocation();
       setUserLocation(freshLocation);
@@ -1275,17 +1312,20 @@ const RadarView = () => {
                   <LoadingDots label="Updating" />
                 </div>
               )}
-              {!loading && !userLocation && (
+              {!loading && (radarLoadPhase === 'starting' || isNearbyRefreshing) && (
                 <div className="radar-loading">
-                  <LoadingDots label="Starting radar" />
+                  <LoadingDots
+                    label={radarLoadPhase === 'starting' ? 'Starting radar' : 'Searching nearby profiles'}
+                    className={radarLoadPhase === 'searching' ? 'loading-dots--nowrap' : ''}
+                  />
                 </div>
               )}
-              {!loading && filteredUsers.length === 0 && nearbyUsers.length > 0 && (
+              {!loading && !isNearbyRefreshing && hasFetchedNearbyOnce && filteredUsers.length === 0 && nearbyUsers.length > 0 && (
                 <div className="no-users-message">
                   No users match your filters
                 </div>
               )}
-              {!loading && userLocation && nearbyUsers.length === 0 && (
+              {!loading && !isNearbyRefreshing && hasFetchedNearbyOnce && userLocation && nearbyUsers.length === 0 && (
                 <div className="no-users-message">
                   No users nearby in explore mode
                 </div>
@@ -1310,7 +1350,7 @@ const RadarView = () => {
               )}
             </div>
 
-            {usersInRange.length === 0 ? (
+            {hasFetchedNearbyOnce && !isNearbyRefreshing && usersInRange.length === 0 ? (
               <div className="nearby-empty">No profiles within current filter and distance.</div>
             ) : (
               <div className="nearby-list" ref={nearbyListRef}>
