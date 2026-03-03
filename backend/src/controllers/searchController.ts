@@ -67,7 +67,6 @@ export const searchProfiles = async (req: Request, res: Response) => {
     const skip = (pageNum - 1) * limitNum;
 
     let profiles;
-    let total;
     const branchFilters: any[] = [];
 
     // If distance filter is provided, use geospatial query
@@ -111,7 +110,7 @@ export const searchProfiles = async (req: Request, res: Response) => {
     }
 
     const finalFilter = branchFilters.length > 1 ? { $or: branchFilters } : branchFilters[0] || {};
-    [profiles, total] = await Promise.all([
+    const [fetchedProfiles, total] = await Promise.all([
       Profile.find(finalFilter)
         .select('-__v')
         .skip(skip)
@@ -119,6 +118,7 @@ export const searchProfiles = async (req: Request, res: Response) => {
         .lean(),
       Profile.countDocuments(finalFilter)
     ]);
+    profiles = fetchedProfiles;
 
     // Promote exact username matches to top
     if (usernameQuery && profiles.length > 0) {

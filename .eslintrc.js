@@ -1,5 +1,11 @@
 module.exports = {
   parser: '@typescript-eslint/parser',
+  ignorePatterns: [
+    '**/dist/**',
+    '**/*.d.ts',
+    '**/*.test.ts',
+    'node_modules/**'
+  ],
   extends: [
     'eslint:recommended',
     'plugin:@typescript-eslint/recommended'

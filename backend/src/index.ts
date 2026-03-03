@@ -1,5 +1,4 @@
 import express, { Application } from 'express';
-import cors from 'cors';
 import dotenv from 'dotenv';
 import http from 'http';
 import { connectDatabase } from './config/database';
@@ -10,7 +9,6 @@ dotenv.config();
 
 const app: Application = express();
 const PORT = process.env.PORT || 3000;
-const CORS_ORIGIN = process.env.CORS_ORIGIN || 'http://localhost:5173';
 
 // Create HTTP server
 const httpServer = http.createServer(app);

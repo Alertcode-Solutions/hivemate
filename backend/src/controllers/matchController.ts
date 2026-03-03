@@ -1,5 +1,4 @@
 import { Request, Response } from 'express';
-import mongoose from 'mongoose';
 import Friendship from '../models/Friendship';
 import MatchLike from '../models/MatchLike';
 import MatchRelationship from '../models/MatchRelationship';
