@@ -54,7 +54,7 @@ const ACTION_SHEET_MARGIN = 10;
 const SWIPE_REPLY_THRESHOLD = 54;
 const MAX_SWIPE_DISTANCE = 60;
 const PREVIEW_REPLY_CHARS = 90;
-const AUTO_SCROLL_BOTTOM_EPSILON = 50;
+const AUTO_SCROLL_BOTTOM_EPSILON = 100;
 
 type MessageActionSheetState = {
   messageId: string;
@@ -181,8 +181,8 @@ const ChatPage = () => {
   const longPressTimerRef = useRef<number | null>(null);
   const longPressMovedRef = useRef(false);
   const activePointerIdRef = useRef<number | null>(null);
-  const isNearBottomRef = useRef(true);
-  const shouldAutoScrollRef = useRef(true);
+  const isAtBottomRef = useRef(true);
+  const forceScrollToBottomRef = useRef(false);
   const initialScrollDoneRef = useRef<string>('');
   const swipeStartRef = useRef<{ id: string; x: number; y: number } | null>(null);
   const highlightTimerRef = useRef<number | null>(null);
@@ -209,14 +209,6 @@ const ChatPage = () => {
       }
     }
     return String(value);
-  };
-
-
-  const isAtBottom = (container: HTMLDivElement | null) => {
-    if (!container) return true;
-    const distanceFromBottom =
-      container.scrollHeight - container.scrollTop - container.clientHeight;
-    return distanceFromBottom <= AUTO_SCROLL_BOTTOM_EPSILON;
   };
 
   const setChatViewportHeight = () => {
@@ -283,6 +275,12 @@ const ChatPage = () => {
     });
   };
 
+  const handleMessagesScroll = (event: React.UIEvent<HTMLDivElement>) => {
+    const { scrollTop, scrollHeight, clientHeight } = event.currentTarget;
+    const distanceToBottom = scrollHeight - scrollTop - clientHeight;
+    isAtBottomRef.current = distanceToBottom <= AUTO_SCROLL_BOTTOM_EPSILON;
+  };
+
   const toReadableTimestamp = (value?: string | Date | null) => {
     if (!value) return '';
     const date = new Date(value);
@@ -324,8 +322,8 @@ const ChatPage = () => {
 
   useEffect(() => {
     if (selectedChatRoom) {
-      shouldAutoScrollRef.current = true;
-      isNearBottomRef.current = true;
+      forceScrollToBottomRef.current = true;
+      isAtBottomRef.current = true;
       initialScrollDoneRef.current = '';
       setReplyTarget(null);
       setReactionSheetMessageId(null);
@@ -548,9 +546,7 @@ const ChatPage = () => {
       const keyboardOffset = Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop);
       applyKeyboardOffset(keyboardOffset);
       if (inputFocusedRef.current && selectedChatRoomRef.current) {
-        shouldAutoScrollRef.current = true;
-        isNearBottomRef.current = true;
-        requestAnimationFrame(() => scrollToBottom());
+        forceScrollToBottom();
       }
     };
 
@@ -579,27 +575,17 @@ const ChatPage = () => {
   }, []);
 
   useEffect(() => {
-    const container = messagesContainerRef.current;
-    if (!container) return;
-
-    const updateNearBottom = () => {
-      isNearBottomRef.current = isAtBottom(container);
-    };
-
-    updateNearBottom();
-    container.addEventListener('scroll', updateNearBottom, { passive: true });
-    return () => container.removeEventListener('scroll', updateNearBottom);
-  }, [selectedChatRoom?.chatRoomId]);
-
-  useEffect(() => {
     if (!messages.length) return;
-    const container = messagesContainerRef.current;
-    const userAtBottom = isAtBottom(container);
-    if (!shouldAutoScrollRef.current && !userAtBottom) return;
-
-    scrollToBottom();
-    shouldAutoScrollRef.current = false;
-    isNearBottomRef.current = true;
+    if (forceScrollToBottomRef.current) {
+      scrollToBottom();
+      forceScrollToBottomRef.current = false;
+      isAtBottomRef.current = true;
+      return;
+    }
+    if (isAtBottomRef.current) {
+      scrollToBottom();
+      isAtBottomRef.current = true;
+    }
   }, [messages]);
 
   useEffect(() => {
@@ -658,7 +644,6 @@ const ChatPage = () => {
         );
 
         if (selectedChatRoomRef.current && data.chatRoomId === selectedChatRoomRef.current.chatRoomId) {
-          shouldAutoScrollRef.current = isAtBottom(messagesContainerRef.current);
           const newMessage: Message = {
             id: normalizeId(data.messageId),
             senderId: data.senderId,
@@ -670,12 +655,15 @@ const ChatPage = () => {
             reactions: []
           };
           appendMessageDedup(newMessage);
+          if (normalizeId(data.senderId) === currentUserIdStr) {
+            forceScrollToBottomRef.current = true;
+            isAtBottomRef.current = true;
+          }
         }
 
         loadChatRooms();
       } catch (error) {
         if (selectedChatRoomRef.current && data.chatRoomId === selectedChatRoomRef.current.chatRoomId) {
-          shouldAutoScrollRef.current = isAtBottom(messagesContainerRef.current);
           const unreadableMessage: Message = {
             id: normalizeId(data.messageId),
             senderId: data.senderId,
@@ -687,6 +675,10 @@ const ChatPage = () => {
             reactions: []
           };
           appendMessageDedup(unreadableMessage);
+          if (normalizeId(data.senderId) === currentUserIdStr) {
+            forceScrollToBottomRef.current = true;
+            isAtBottomRef.current = true;
+          }
         }
       }
     };
@@ -960,8 +952,24 @@ const ChatPage = () => {
         );
         const normalizedRoomId = normalizeId(chatRoomId);
         const isFirstLoadForRoom = initialScrollDoneRef.current !== normalizedRoomId;
-        shouldAutoScrollRef.current = isFirstLoadForRoom || isAtBottom(messagesContainerRef.current);
+        const container = messagesContainerRef.current;
+        const previousScrollHeight = container?.scrollHeight || 0;
+        const previousScrollTop = container?.scrollTop || 0;
+        if (isFirstLoadForRoom) {
+          forceScrollToBottomRef.current = true;
+          isAtBottomRef.current = true;
+        }
         setMessages(upsertMessagesById(decryptedMessages));
+        if (!isFirstLoadForRoom && previousScrollTop <= 1) {
+          requestAnimationFrame(() => {
+            const currentContainer = messagesContainerRef.current;
+            if (!currentContainer) return;
+            const heightDelta = currentContainer.scrollHeight - previousScrollHeight;
+            if (heightDelta > 0) {
+              currentContainer.scrollTop = heightDelta;
+            }
+          });
+        }
         if (isFirstLoadForRoom) {
           initialScrollDoneRef.current = normalizedRoomId;
         }
@@ -1050,8 +1058,7 @@ const ChatPage = () => {
           deletedForEveryone: false,
           reactions: []
         };
-        shouldAutoScrollRef.current = true;
-        isNearBottomRef.current = true;
+        forceScrollToBottom();
         appendMessageDedup(newMessage);
         setMessageInput('');
         setReplyTarget(null);
@@ -1059,6 +1066,7 @@ const ChatPage = () => {
         setActionSheet(null);
         if (messageInputRef.current) {
           messageInputRef.current.style.height = 'auto';
+          messageInputRef.current.focus();
         }
         emitTypingState(false);
         if (typingStopTimeoutRef.current) {
@@ -1106,9 +1114,7 @@ const ChatPage = () => {
   const addEmojiToInput = (emoji: string) => {
     setMessageInput((prev) => `${prev}${emoji}`);
     messageInputRef.current?.focus();
-    if (isAtBottom(messagesContainerRef.current)) {
-      shouldAutoScrollRef.current = true;
-      isNearBottomRef.current = true;
+    if (isAtBottomRef.current) {
       requestAnimationFrame(() => scrollToBottom());
     }
   };
@@ -1347,6 +1353,12 @@ const ChatPage = () => {
       return;
     }
     messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
+  };
+
+  const forceScrollToBottom = () => {
+    forceScrollToBottomRef.current = true;
+    isAtBottomRef.current = true;
+    requestAnimationFrame(() => scrollToBottom());
   };
 
   const formatTime = (date: Date) => {
@@ -1842,7 +1854,7 @@ const ChatPage = () => {
                 </div>
               </div>
 
-              <div className="messages-container" ref={messagesContainerRef}>
+              <div className="messages-container" ref={messagesContainerRef} onScroll={handleMessagesScroll}>
                 {messages.map((message, index) => {
                   const isOwnMessage = String(message.senderId) === currentUserIdStr;
                   const showDate = index === 0 || 
@@ -1990,9 +2002,7 @@ const ChatPage = () => {
                       } else if (!keyboardVisibleRef.current) {
                         keyboardHoldOffsetRef.current = 0;
                       }
-                      if (isAtBottom(messagesContainerRef.current)) {
-                        shouldAutoScrollRef.current = true;
-                        isNearBottomRef.current = true;
+                      if (isAtBottomRef.current) {
                         requestAnimationFrame(() => scrollToBottom());
                       }
                       return next;
@@ -2036,9 +2046,7 @@ const ChatPage = () => {
                       ? Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop)
                       : 0;
                     applyKeyboardOffset(keyboardOffset);
-                    shouldAutoScrollRef.current = true;
-                    isNearBottomRef.current = true;
-                    requestAnimationFrame(() => scrollToBottom());
+                    forceScrollToBottom();
                     window.setTimeout(() => scrollToBottom(), 40);
                     window.setTimeout(() => scrollToBottom(), 120);
                   }}
@@ -2051,7 +2059,10 @@ const ChatPage = () => {
                   disabled={sending}
                 />
                 <button
+                  type="button"
                   className="send-button"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onTouchStart={(e) => e.preventDefault()}
                   onClick={sendMessage}
                   disabled={!messageInput.trim() || sending}
                 >
