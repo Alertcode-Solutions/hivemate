@@ -1,5 +1,10 @@
 .profile-page {
   min-height: 100vh;
+  height: 100dvh;
+  overflow-x: hidden;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-y: contain;
   padding: 1rem 0 1.8rem;
   background:
     radial-gradient(1200px 560px at 12% -8%, rgba(37, 99, 235, 0.22), transparent 68%),

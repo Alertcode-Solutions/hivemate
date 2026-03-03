@@ -973,7 +973,7 @@ const ProfilePage = () => {
                         onClick={unlikeProfile}
                         disabled={matchLoading}
                       >
-                        {matchLoading ? 'Updating...' : (isMatched ? 'Unlike' : 'Withdraw Like')}
+                        {matchLoading ? 'Updating...' : (isMatched ? 'Break Up' : 'Withdraw Proposal')}
                       </button>
                     ) : (
                       <button
@@ -982,7 +982,7 @@ const ProfilePage = () => {
                         onClick={likeProfile}
                         disabled={matchLoading}
                       >
-                        {matchLoading ? 'Updating...' : 'Like'}
+                        {matchLoading ? 'Updating...' : 'Propose'}
                       </button>
                     )
                   )}

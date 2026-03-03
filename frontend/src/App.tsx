@@ -41,12 +41,34 @@ const RouteScrollController = () => {
     const html = document.documentElement;
     const body = document.body;
 
+    const clearLegacyScrollLockStyles = () => {
+      html.style.removeProperty('position');
+      html.style.removeProperty('top');
+      html.style.removeProperty('left');
+      html.style.removeProperty('right');
+      html.style.removeProperty('width');
+      html.style.removeProperty('height');
+      html.style.removeProperty('overflow');
+
+      body.style.removeProperty('position');
+      body.style.removeProperty('top');
+      body.style.removeProperty('left');
+      body.style.removeProperty('right');
+      body.style.removeProperty('width');
+      body.style.removeProperty('height');
+      body.style.removeProperty('overflow');
+    };
+
     html.classList.toggle('route-chat-lock', isChatRoute);
     body.classList.toggle('route-chat-lock', isChatRoute);
+    if (!isChatRoute) {
+      clearLegacyScrollLockStyles();
+    }
 
     return () => {
       html.classList.remove('route-chat-lock');
       body.classList.remove('route-chat-lock');
+      clearLegacyScrollLockStyles();
     };
   }, [location.pathname]);
 
