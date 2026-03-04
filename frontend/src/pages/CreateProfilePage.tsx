@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { getApiBaseUrl } from '../utils/runtimeConfig';
@@ -70,6 +70,16 @@ const CreateProfilePage = () => {
   const [usernameAvailable, setUsernameAvailable] = useState<boolean | null>(null);
   const [usernameMessage, setUsernameMessage] = useState('');
   const [usernameSuggestions, setUsernameSuggestions] = useState<string[]>([]);
+  const pageScrollRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const html = document.documentElement;
+    const body = document.body;
+    html.classList.remove('route-chat-lock');
+    body.classList.remove('route-chat-lock');
+    html.style.removeProperty('overflow');
+    body.style.removeProperty('overflow');
+  }, []);
 
   const filteredLocations = INDIA_CITY_OPTIONS.filter((option) =>
     option.toLowerCase().includes((locationQuery || formData.place).toLowerCase())
@@ -330,8 +340,29 @@ const CreateProfilePage = () => {
       reader.readAsDataURL(file);
     });
 
+  const handleFieldFocusCapture = (event: React.FocusEvent<HTMLDivElement>) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) return;
+
+    const isFormControl =
+      target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT';
+    if (!isFormControl) return;
+
+    window.setTimeout(() => {
+      target.scrollIntoView({
+        block: 'center',
+        inline: 'nearest',
+        behavior: 'smooth'
+      });
+    }, 120);
+  };
+
   return (
-    <div className="create-profile-page">
+    <div
+      className="create-profile-page"
+      ref={pageScrollRef}
+      onFocusCapture={handleFieldFocusCapture}
+    >
       <div className="profile-container">
         <div className="profile-header">
           <div className="profile-logo">

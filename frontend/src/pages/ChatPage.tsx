@@ -237,6 +237,7 @@ const ChatPage = () => {
   const reactionSocketPendingRef = useRef<
     Record<string, Array<{ userId: string; emoji: string; reactedAt?: Date | string }>>
   >({});
+  void reactionSocketDebounceTimersRef; void reactionSocketPendingRef;
   const deleteMessageInFlightRef = useRef<Record<string, boolean>>({});
   const deleteForEveryoneInFlightRef = useRef<Record<string, boolean>>({});
 
