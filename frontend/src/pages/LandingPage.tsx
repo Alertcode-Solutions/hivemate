@@ -150,7 +150,7 @@ const LandingPage = () => {
           <div className="landing-copy">
             <p className="landing-eyebrow">NETWORKING, REIMAGINED</p>
             <h1 className="landing-title">
-              Meet people nearby before the moment passes.
+              Meet people nearby before the moment pass.
             </h1> 
             <p className="landing-subtitle">
               Discover collaborators, teammates and meaningful connections around you in real time.
