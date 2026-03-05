@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, type SyntheticEvent, type CSSProperties } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { getApiBaseUrl } from '../utils/runtimeConfig';
 import { goToProfile, resolveProfileTarget } from '../utils/profileRouting';
@@ -38,6 +38,7 @@ const ProfilePreviewModal = ({
   const [matchStatus, setMatchStatus] = useState<MatchStatus | null>(null);
   const [matchLoading, setMatchLoading] = useState(false);
   const [matchError, setMatchError] = useState('');
+  const [overlayInsets, setOverlayInsets] = useState({ top: 0, bottom: 0 });
   const requestIdRef = useRef(0);
 
   const API_URL = getApiBaseUrl();
@@ -73,6 +74,49 @@ const ProfilePreviewModal = ({
   useEffect(() => {
     fetchProfileAndRelationship();
   }, [userId]);
+
+  useEffect(() => {
+    const computeInsets = () => {
+      const topGap = 8;
+      const bottomGap = 8;
+      let topInset = 0;
+      let bottomInset = 0;
+
+      const headerEl = document.querySelector('.homepage-header') as HTMLElement | null;
+      if (headerEl) {
+        const headerStyle = window.getComputedStyle(headerEl);
+        if (headerStyle.display !== 'none' && headerStyle.visibility !== 'hidden') {
+          const rect = headerEl.getBoundingClientRect();
+          topInset = Math.max(0, Math.round(rect.bottom + topGap));
+        }
+      }
+
+      const bottomNavEl = document.querySelector('.mobile-bottom-nav') as HTMLElement | null;
+      if (bottomNavEl) {
+        const navStyle = window.getComputedStyle(bottomNavEl);
+        if (navStyle.display !== 'none' && navStyle.visibility !== 'hidden') {
+          const rect = bottomNavEl.getBoundingClientRect();
+          const viewportHeight = window.visualViewport?.height ?? window.innerHeight;
+          bottomInset = Math.max(0, Math.round(viewportHeight - rect.top + bottomGap));
+        }
+      }
+
+      setOverlayInsets({ top: topInset, bottom: bottomInset });
+    };
+
+    computeInsets();
+    window.addEventListener('resize', computeInsets);
+    window.addEventListener('orientationchange', computeInsets);
+    window.visualViewport?.addEventListener('resize', computeInsets);
+    window.visualViewport?.addEventListener('scroll', computeInsets);
+
+    return () => {
+      window.removeEventListener('resize', computeInsets);
+      window.removeEventListener('orientationchange', computeInsets);
+      window.visualViewport?.removeEventListener('resize', computeInsets);
+      window.visualViewport?.removeEventListener('scroll', computeInsets);
+    };
+  }, []);
 
   const fetchProfileAndRelationship = async (forceRefresh = false) => {
     const requestId = ++requestIdRef.current;
@@ -277,11 +321,33 @@ const ProfilePreviewModal = ({
   const canLike = isConnected && Boolean(matchStatus?.canLike);
   const proposeIsRevert = isMatched || Boolean(matchStatus?.likedByMe);
   const proposeLabel = proposeIsRevert ? (isMatched ? 'Breakup' : 'Withdraw Proposal') : 'Propose';
+  const requestClose = (event?: SyntheticEvent) => {
+    if (event) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+    onClose();
+  };
+  const overlayStyle = {
+    '--profile-preview-top-inset': `${overlayInsets.top}px`,
+    '--profile-preview-bottom-inset': `${overlayInsets.bottom}px`
+  } as CSSProperties;
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-        <button className="modal-close" onClick={onClose} type="button" aria-label="Close profile preview">
+    <div className="modal-overlay" onClick={requestClose} style={overlayStyle}>
+      <div
+        className="modal-content"
+        onClick={(e) => e.stopPropagation()}
+        onPointerDown={(e) => e.stopPropagation()}
+        onTouchStart={(e) => e.stopPropagation()}
+      >
+        <button
+          className="modal-close"
+          onClick={requestClose}
+          onTouchEnd={requestClose}
+          type="button"
+          aria-label="Close profile preview"
+        >
           &times;
         </button>
 

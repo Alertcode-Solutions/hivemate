@@ -1,15 +1,15 @@
 .modal-overlay {
   position: fixed;
-  top: 0;
+  top: var(--profile-preview-top-inset, 0px);
   left: 0;
   right: 0;
-  bottom: 0;
-  background: rgba(0, 0, 0, 0.7);
+  bottom: var(--profile-preview-bottom-inset, 0px);
+  background: transparent;
   display: flex;
   align-items: center;
   justify-content: center;
   z-index: 10020;
-  padding: 0.9rem;
+  padding: 0.65rem;
 }
 
 .modal-content {
@@ -17,12 +17,14 @@
   border-radius: 26px;
   max-width: 420px;
   width: 100%;
-  max-height: min(90vh, 760px);
-  overflow-y: auto;
+  max-height: min(100%, 760px);
+  overflow: hidden;
   position: relative;
   z-index: 10021;
   border: 1px solid var(--border-subtle);
   box-shadow: 0 28px 70px rgba(2, 6, 23, 0.38);
+  display: flex;
+  flex-direction: column;
 }
 
 .modal-close {
@@ -41,6 +43,9 @@
   justify-content: center;
   border-radius: 50%;
   transition: all var(--transition-fast);
+  z-index: 20;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid rgba(203, 213, 225, 0.75);
 }
 
 .modal-close:hover {
@@ -60,8 +65,14 @@
 }
 
 .profile-preview {
-  padding: 1.25rem 1.05rem 1.15rem;
-  z-index: 5;
+  padding: 3.35rem 1.05rem 1.15rem;
+  position: relative;
+  z-index: 1;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .profile-header {
@@ -73,7 +84,7 @@
 
 .profile-avatar-wrap {
   width: fit-content;
-  margin: 0 auto 0.62rem;
+  margin: 0.2rem auto 0.62rem;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -90,6 +101,7 @@
 
 .profile-avatar {
   object-fit: cover;
+  object-position: center center;
 }
 
 .profile-avatar-fallback {
@@ -287,13 +299,13 @@
 
 @media (max-width: 768px) {
   .modal-content {
-    max-height: 92vh;
+    max-height: 100%;
     z-index: 6;
     border-radius: 24px;
   }
 
   .profile-preview {
-    padding: 1.2rem 0.95rem 1.05rem;
+    padding: 3.1rem 0.95rem 1.05rem;
     z-index: 5;
   }
 

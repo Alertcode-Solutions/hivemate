@@ -54,20 +54,6 @@ const MenuIcon = () => (
   </svg>
 );
 
-const StarIcon = () => (
-  <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-    <path d="m12 4.2 2.1 4.3 4.8.7-3.5 3.5.8 4.9L12 15.3 7.8 17.6l.8-4.9L5.1 9.2l4.8-.7L12 4.2Z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
-  </svg>
-);
-
-const InfoIcon = () => (
-  <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-    <circle cx="12" cy="12" r="8.3" fill="none" stroke="currentColor" strokeWidth="1.8" />
-    <circle cx="12" cy="8.2" r="1" fill="currentColor" />
-    <path d="M12 11.5v5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-  </svg>
-);
-
 const LogoutIcon = () => (
   <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
     <path d="M10.5 4.8H6.8a1.9 1.9 0 0 0-1.8 1.9v10.6a1.9 1.9 0 0 0 1.8 1.9h3.7" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
@@ -219,14 +205,6 @@ const HomePage = () => {
                 <span className="menu-icon"><ChatIcon /></span>
                 Messages
               </button>
-              <button onClick={() => { navigate('/subscription'); setMenuOpen(false); setMobileMenuOpen(false); }}>
-                <span className="menu-icon"><StarIcon /></span>
-                Subscription
-              </button>
-              <button onClick={() => { navigate('/about'); setMenuOpen(false); setMobileMenuOpen(false); }}>
-                <span className="menu-icon"><InfoIcon /></span>
-                About Us
-              </button>
               <button onClick={() => { handleLogout(); setMenuOpen(false); setMobileMenuOpen(false); }} className="logout-button">
                 <span className="menu-icon"><LogoutIcon /></span>
                 Logout
@@ -307,14 +285,6 @@ const HomePage = () => {
           <button onClick={() => { navigate('/connections'); setMobileMenuOpen(false); }}>
             <span className="menu-icon"><ConnectionIcon /></span>
             Requests
-          </button>
-          <button onClick={() => { navigate('/subscription'); setMobileMenuOpen(false); }}>
-            <span className="menu-icon"><StarIcon /></span>
-            Subscription
-          </button>
-          <button onClick={() => { navigate('/about'); setMobileMenuOpen(false); }}>
-            <span className="menu-icon"><InfoIcon /></span>
-            About Us
           </button>
           <button onClick={() => { handleLogout(); setMobileMenuOpen(false); }} className="logout-button">
             <span className="menu-icon"><LogoutIcon /></span>

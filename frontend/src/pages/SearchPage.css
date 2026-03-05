@@ -444,6 +444,14 @@
   height: 52px;
   flex-shrink: 0;
   margin: 0;
+  border: none;
+  box-shadow: none;
+  border-radius: 999px;
+  overflow: hidden;
+  background: transparent;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .search-page .profile-avatar img,
