@@ -64,13 +64,13 @@ type MessageActionSheetState = {
   x: number;
   y: number;
   alignX: 'left' | 'right';
-  alignY: 'above' | 'below';
+  alignY: 'above' | 'below' | 'side';
 } | null;
 type MessageActionSheetPosition = {
   x: number;
   y: number;
   alignX: 'left' | 'right';
-  alignY: 'above' | 'below';
+  alignY: 'above' | 'below' | 'side';
 };
 
 type ChatActionSheetState = {
@@ -1184,10 +1184,12 @@ const ChatPage = () => {
           new URLSearchParams(window.location.search).get('user') || userFromQuery
         );
         if (normalizedRoomId && chats.length > 0) {
-      const room = chats.find((c: ChatRoom) => String(c.chatRoomId) === normalizedRoomId);
-      if (room) {
-            openChatRoom(room, { pushMobileHistory: false });
-            console.log('[ChatPage] Selected room from deep link after chats load:', normalizedRoomId);
+          const room = chats.find((c: ChatRoom) => String(c.chatRoomId) === normalizedRoomId);
+          if (room) {
+            if (String(selectedChatRoomRef.current?.chatRoomId || '') !== String(room.chatRoomId)) {
+              openChatRoom(room, { pushMobileHistory: false });
+              console.log('[ChatPage] Selected room from deep link after chats load:', normalizedRoomId);
+            }
             return;
           }
           // Keep mobile chat pane open for deep links even before room data resolves.
@@ -1201,7 +1203,9 @@ const ChatPage = () => {
           );
           if (roomByUser) {
             openedUserQueryRef.current = '';
-            openChatRoom(roomByUser, { pushMobileHistory: false });
+            if (String(selectedChatRoomRef.current?.chatRoomId || '') !== String(roomByUser.chatRoomId)) {
+              openChatRoom(roomByUser, { pushMobileHistory: false });
+            }
             return;
           }
           if (openedUserQueryRef.current === normalizedUserId) {
@@ -1220,7 +1224,9 @@ const ChatPage = () => {
             c.participants.some((p) => normalizeId(p.userId) === resolvedTargetId)
           );
           if (chat) {
-            openChatRoom(chat, { pushMobileHistory: false });
+            if (String(selectedChatRoomRef.current?.chatRoomId || '') !== String(chat.chatRoomId)) {
+              openChatRoom(chat, { pushMobileHistory: false });
+            }
           } else {
             await openDirectChat(resolvedTargetId);
           }
@@ -2061,7 +2067,37 @@ const ChatPage = () => {
       Math.min(preferredX, viewportWidth - ACTION_SHEET_WIDTH - ACTION_SHEET_MARGIN)
     );
 
+    const spaceAbove = rect.top;
     const spaceBelow = viewportHeight - rect.bottom;
+    const hasSpaceAbove = spaceAbove >= 280;
+    const hasSpaceBelow = spaceBelow >= 280;
+    if (!hasSpaceAbove && !hasSpaceBelow) {
+      const sideGap = 10;
+      const sidePreferredX = isOwn ? rect.left - ACTION_SHEET_WIDTH - sideGap : rect.right + sideGap;
+      const sideFallbackX = isOwn ? rect.right + sideGap : rect.left - ACTION_SHEET_WIDTH - sideGap;
+      const sideX = Math.max(
+        ACTION_SHEET_MARGIN,
+        Math.min(
+          sidePreferredX >= ACTION_SHEET_MARGIN &&
+            sidePreferredX <= viewportWidth - ACTION_SHEET_WIDTH - ACTION_SHEET_MARGIN
+            ? sidePreferredX
+            : sideFallbackX,
+          viewportWidth - ACTION_SHEET_WIDTH - ACTION_SHEET_MARGIN
+        )
+      );
+      const centeredY = rect.top + rect.height / 2 - 140;
+      const sideY = Math.max(
+        ACTION_SHEET_MARGIN,
+        Math.min(centeredY, viewportHeight - 280 - ACTION_SHEET_MARGIN)
+      );
+      return {
+        x: sideX,
+        y: sideY,
+        alignX: isOwn ? 'right' : 'left',
+        alignY: 'side'
+      };
+    }
+
     const sheetHeightEstimate = 280;
     const alignY: 'above' | 'below' = spaceBelow < sheetHeightEstimate ? 'above' : 'below';
     const y = alignY === 'above' ? rect.top - 8 : rect.bottom + 8;

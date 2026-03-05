@@ -9,6 +9,18 @@ import { getApiBaseUrl } from './runtimeConfig';
 const ENCRYPTION_ALGORITHM = 'RSA-OAEP';
 const KEY_SIZE = 2048;
 const HASH_ALGORITHM = 'SHA-256';
+const RSA_MAX_PLAINTEXT_BYTES = 190;
+const AES_ALGORITHM = 'AES-GCM';
+const AES_KEY_LENGTH = 256;
+const AES_IV_LENGTH_BYTES = 12;
+
+interface HybridEnvelopeV2 {
+  v: 2;
+  alg: 'RSA-OAEP+A256GCM';
+  ek: string;
+  iv: string;
+  ct: string;
+}
 
 export interface KeyPair {
   publicKey: CryptoKey;
@@ -129,15 +141,17 @@ export class EncryptionService {
       const encoder = new TextEncoder();
       const data = encoder.encode(message);
 
+      if (data.byteLength > RSA_MAX_PLAINTEXT_BYTES) {
+        return await this.encryptHybridMessage(data, recipientPublicKey);
+      }
+
       const encrypted = await window.crypto.subtle.encrypt(
         { name: ENCRYPTION_ALGORITHM },
         recipientPublicKey,
         data
       );
 
-      const encryptedArray = new Uint8Array(encrypted);
-      const encryptedString = String.fromCharCode(...encryptedArray);
-      return btoa(encryptedString);
+      return this.bytesToBase64(new Uint8Array(encrypted));
     } catch (error) {
       console.error('Failed to encrypt message:', error);
       throw new Error('Message encryption failed');
@@ -155,16 +169,17 @@ export class EncryptionService {
     }
 
     try {
-      const binaryString = atob(encryptedMessage);
-      const bytes = new Uint8Array(binaryString.length);
-      for (let i = 0; i < binaryString.length; i++) {
-        bytes[i] = binaryString.charCodeAt(i);
+      const hybridEnvelope = this.tryParseHybridEnvelope(encryptedMessage);
+      if (hybridEnvelope) {
+        return await this.decryptHybridMessage(hybridEnvelope, privateKey);
       }
+
+      const bytes = this.base64ToBytes(encryptedMessage);
 
       const decrypted = await window.crypto.subtle.decrypt(
         { name: ENCRYPTION_ALGORITHM },
         privateKey,
-        bytes
+        this.toArrayBuffer(bytes)
       );
 
       const decoder = new TextDecoder();
@@ -305,8 +320,122 @@ export class EncryptionService {
 
   private static async exportPrivateKey(privateKey: CryptoKey): Promise<string> {
     const exported = await window.crypto.subtle.exportKey('pkcs8', privateKey);
-    const exportedAsString = String.fromCharCode(...new Uint8Array(exported));
-    return btoa(exportedAsString);
+    return this.bytesToBase64(new Uint8Array(exported));
+  }
+
+  private static async encryptHybridMessage(
+    data: Uint8Array,
+    recipientPublicKey: CryptoKey
+  ): Promise<string> {
+    const aesKey = await window.crypto.subtle.generateKey(
+      { name: AES_ALGORITHM, length: AES_KEY_LENGTH },
+      true,
+      ['encrypt', 'decrypt']
+    );
+    const iv = window.crypto.getRandomValues(new Uint8Array(AES_IV_LENGTH_BYTES));
+    const cipherBuffer = await window.crypto.subtle.encrypt(
+      { name: AES_ALGORITHM, iv: this.toArrayBuffer(iv) },
+      aesKey,
+      this.toArrayBuffer(data)
+    );
+
+    const rawAesKey = await window.crypto.subtle.exportKey('raw', aesKey);
+    const encryptedKeyBuffer = await window.crypto.subtle.encrypt(
+      { name: ENCRYPTION_ALGORITHM },
+      recipientPublicKey,
+      rawAesKey
+    );
+
+    const payload: HybridEnvelopeV2 = {
+      v: 2,
+      alg: 'RSA-OAEP+A256GCM',
+      ek: this.bytesToBase64(new Uint8Array(encryptedKeyBuffer)),
+      iv: this.bytesToBase64(iv),
+      ct: this.bytesToBase64(new Uint8Array(cipherBuffer))
+    };
+
+    return this.utf8ToBase64(JSON.stringify(payload));
+  }
+
+  private static async decryptHybridMessage(
+    envelope: HybridEnvelopeV2,
+    privateKey: CryptoKey
+  ): Promise<string> {
+    const encryptedAesKey = this.base64ToBytes(envelope.ek);
+    const rawAesKey = await window.crypto.subtle.decrypt(
+      { name: ENCRYPTION_ALGORITHM },
+      privateKey,
+      this.toArrayBuffer(encryptedAesKey)
+    );
+
+    const aesKey = await window.crypto.subtle.importKey(
+      'raw',
+      rawAesKey,
+      { name: AES_ALGORITHM },
+      false,
+      ['decrypt']
+    );
+
+    const iv = this.base64ToBytes(envelope.iv);
+    const cipherBytes = this.base64ToBytes(envelope.ct);
+    const decrypted = await window.crypto.subtle.decrypt(
+      { name: AES_ALGORITHM, iv: this.toArrayBuffer(iv) },
+      aesKey,
+      this.toArrayBuffer(cipherBytes)
+    );
+
+    return new TextDecoder().decode(decrypted);
+  }
+
+  private static tryParseHybridEnvelope(encryptedMessage: string): HybridEnvelopeV2 | null {
+    try {
+      const decoded = this.base64ToUtf8(encryptedMessage);
+      const parsed = JSON.parse(decoded);
+      if (
+        parsed &&
+        parsed.v === 2 &&
+        parsed.alg === 'RSA-OAEP+A256GCM' &&
+        typeof parsed.ek === 'string' &&
+        typeof parsed.iv === 'string' &&
+        typeof parsed.ct === 'string'
+      ) {
+        return parsed as HybridEnvelopeV2;
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  private static bytesToBase64(bytes: Uint8Array): string {
+    let binary = '';
+    const chunkSize = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      const chunk = bytes.subarray(i, i + chunkSize);
+      binary += String.fromCharCode(...chunk);
+    }
+    return btoa(binary);
+  }
+
+  private static base64ToBytes(value: string): Uint8Array {
+    const binaryString = atob(value);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+    return bytes;
+  }
+
+  private static utf8ToBase64(value: string): string {
+    return this.bytesToBase64(new TextEncoder().encode(value));
+  }
+
+  private static base64ToUtf8(value: string): string {
+    return new TextDecoder().decode(this.base64ToBytes(value));
+  }
+
+  private static toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+    return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
   }
 
   private static async loadKeyPairFromServer(): Promise<KeyPair | null> {

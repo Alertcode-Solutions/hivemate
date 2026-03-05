@@ -1074,6 +1074,10 @@
   transform: translateY(-100%);
 }
 
+.menu-side {
+  transform: none;
+}
+
 .reaction-row {
   display: grid;
   grid-template-columns: repeat(6, minmax(0, 1fr));
