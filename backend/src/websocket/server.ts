@@ -10,7 +10,7 @@ const CORS_ORIGIN = process.env.CORS_ORIGIN || '*';
 
 export class WebSocketServer {
   private io: SocketIOServer;
-  private userSockets: Map<string, string> = new Map(); // userId -> socketId
+  private userSockets: Map<string, Set<string>> = new Map(); // userId -> socketIds
   private userLastSeen: Map<string, Date> = new Map();
   private normalizeUserId(userId: any): string {
     if (!userId) return '';
@@ -54,11 +54,14 @@ export class WebSocketServer {
 
   private setupEventHandlers() {
     this.io.on('connection', (socket) => {
-      const userId = (socket as any).userId;
+      const userId = this.normalizeUserId((socket as any).userId);
+      (socket as any).userId = userId;
       console.log(`✅ User connected: ${userId} (socket: ${socket.id})`);
 
       // Store user socket mapping
-      this.userSockets.set(userId, socket.id);
+      const existingSockets = this.userSockets.get(userId) || new Set<string>();
+      existingSockets.add(socket.id);
+      this.userSockets.set(userId, existingSockets);
       this.userLastSeen.set(userId, new Date());
 
       // Join user's personal room
@@ -72,14 +75,22 @@ export class WebSocketServer {
       // Handle disconnection
       socket.on('disconnect', () => {
         console.log(`❌ User disconnected: ${userId}`);
-        this.userSockets.delete(userId);
-        const lastSeen = new Date();
-        this.userLastSeen.set(userId, lastSeen);
-        this.broadcast('presence:update', {
-          userId,
-          online: false,
-          lastSeen
-        });
+        const userSocketSet = this.userSockets.get(userId);
+        if (userSocketSet) {
+          userSocketSet.delete(socket.id);
+          if (userSocketSet.size === 0) {
+            this.userSockets.delete(userId);
+            const lastSeen = new Date();
+            this.userLastSeen.set(userId, lastSeen);
+            this.broadcast('presence:update', {
+              userId,
+              online: false,
+              lastSeen
+            });
+          } else {
+            this.userSockets.set(userId, userSocketSet);
+          }
+        }
       });
 
       // Location update event
@@ -248,7 +259,7 @@ export class WebSocketServer {
    */
   public isUserConnected(userId: string): boolean {
     const normalizedUserId = this.normalizeUserId(userId);
-    return this.userSockets.has(normalizedUserId);
+    return (this.userSockets.get(normalizedUserId)?.size || 0) > 0;
   }
 
   public getUserPresence(userId: string): { online: boolean; lastSeen: Date | null } {
@@ -257,7 +268,7 @@ export class WebSocketServer {
       return { online: false, lastSeen: null };
     }
 
-    const online = this.userSockets.has(normalizedUserId);
+    const online = (this.userSockets.get(normalizedUserId)?.size || 0) > 0;
     return {
       online,
       lastSeen: online ? new Date() : this.userLastSeen.get(normalizedUserId) || null

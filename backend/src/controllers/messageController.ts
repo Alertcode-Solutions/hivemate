@@ -56,7 +56,10 @@ export const sendMessage = async (req: Request, res: Response) => {
       replyToMessageId: replyToMessageId || undefined,
       timestamp: new Date(),
       delivered: false,
-      read: false
+      read: false,
+      savedForEveryone: false,
+      exitedByUsers: [],
+      viewedByUsers: [senderId]
     });
 
     await message.save();
@@ -182,10 +185,13 @@ export const getChatHistory = async (req: Request, res: Response) => {
 
     // Get messages
     const messages = await Message.find(query)
-      .select('senderId receiverId encryptedContent senderEncryptedContent replyToMessageId timestamp delivered read deletedForEveryone reactions')
+      .select('senderId receiverId encryptedContent senderEncryptedContent replyToMessageId timestamp delivered read deletedForEveryone reactions savedForEveryone')
       .sort({ timestamp: -1 })
       .limit(parseInt(limit as string))
       .lean();
+    const visibleMessageIds = messages
+      .map((msg: any) => msg?._id)
+      .filter(Boolean);
 
     const otherParticipantIds = Array.from(
       new Set(
@@ -217,6 +223,13 @@ export const getChatHistory = async (req: Request, res: Response) => {
         },
         { read: true }
       ),
+      Message.updateMany(
+        {
+          _id: { $in: visibleMessageIds },
+          deletedForUsers: { $ne: userId }
+        },
+        { $addToSet: { viewedByUsers: userId } }
+      ),
       Notification.deleteMany(messageNotificationQuery)
     ]);
 
@@ -234,6 +247,7 @@ export const getChatHistory = async (req: Request, res: Response) => {
         delivered: msg.delivered,
         read: msg.read,
         deletedForEveryone: msg.deletedForEveryone,
+        savedByCurrentUser: Boolean(msg.savedForEveryone),
         reactions: (msg.reactions || []).map((reaction: any) => ({
           userId: reaction.userId,
           emoji: reaction.emoji,
@@ -726,6 +740,302 @@ export const deleteMessageForEveryone = async (req: Request, res: Response) => {
       error: {
         code: 'INTERNAL_SERVER_ERROR',
         message: 'An error occurred while deleting message',
+        timestamp: new Date().toISOString()
+      }
+    });
+  }
+};
+
+export const saveMessageForMe = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).userId;
+    const { messageId } = req.params;
+
+    const message = await Message.findById(messageId);
+    if (!message) {
+      return res.status(404).json({
+        error: {
+          code: 'MESSAGE_NOT_FOUND',
+          message: 'Message not found',
+          timestamp: new Date().toISOString()
+        }
+      });
+    }
+
+    const isParticipant = await ChatService.isParticipant(message.chatRoomId.toString(), userId);
+    if (!isParticipant) {
+      return res.status(403).json({
+        error: {
+          code: 'FORBIDDEN',
+          message: 'You are not allowed to save this message',
+          timestamp: new Date().toISOString()
+        }
+      });
+    }
+
+    message.savedForEveryone = true;
+    message.exitedByUsers = [];
+    await message.save();
+
+    try {
+      const wsServer = getWebSocketServer();
+      wsServer.emitToUsers(
+        [message.senderId.toString(), message.receiverId.toString()],
+        'message:saved_state',
+        {
+          messageId: message._id,
+          chatRoomId: message.chatRoomId,
+          savedForEveryone: true
+        }
+      );
+    } catch (wsError) {
+      console.error('Save state socket emit error:', wsError);
+    }
+
+    return res.json({
+      message: 'Message saved',
+      messageId: message._id,
+      saved: true
+    });
+  } catch (error: any) {
+    console.error('Save message error:', error);
+    return res.status(500).json({
+      error: {
+        code: 'INTERNAL_SERVER_ERROR',
+        message: 'An error occurred while saving message',
+        timestamp: new Date().toISOString()
+      }
+    });
+  }
+};
+
+export const unsaveMessageForMe = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).userId;
+    const { messageId } = req.params;
+
+    const message = await Message.findById(messageId);
+    if (!message) {
+      return res.status(404).json({
+        error: {
+          code: 'MESSAGE_NOT_FOUND',
+          message: 'Message not found',
+          timestamp: new Date().toISOString()
+        }
+      });
+    }
+
+    const isParticipant = await ChatService.isParticipant(message.chatRoomId.toString(), userId);
+    if (!isParticipant) {
+      return res.status(403).json({
+        error: {
+          code: 'FORBIDDEN',
+          message: 'You are not allowed to unsave this message',
+          timestamp: new Date().toISOString()
+        }
+      });
+    }
+
+    message.savedForEveryone = false;
+    message.exitedByUsers = [];
+    await message.save();
+
+    try {
+      const wsServer = getWebSocketServer();
+      wsServer.emitToUsers(
+        [message.senderId.toString(), message.receiverId.toString()],
+        'message:saved_state',
+        {
+          messageId: message._id,
+          chatRoomId: message.chatRoomId,
+          savedForEveryone: false
+        }
+      );
+    } catch (wsError) {
+      console.error('Unsave state socket emit error:', wsError);
+    }
+
+    return res.json({
+      message: 'Message unsaved',
+      messageId: message._id,
+      saved: false
+    });
+  } catch (error: any) {
+    console.error('Unsave message error:', error);
+    return res.status(500).json({
+      error: {
+        code: 'INTERNAL_SERVER_ERROR',
+        message: 'An error occurred while unsaving message',
+        timestamp: new Date().toISOString()
+      }
+    });
+  }
+};
+
+export const markMessageViewed = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).userId;
+    const { messageId } = req.params;
+
+    const message = await Message.findById(messageId);
+    if (!message) {
+      return res.status(404).json({
+        error: {
+          code: 'MESSAGE_NOT_FOUND',
+          message: 'Message not found',
+          timestamp: new Date().toISOString()
+        }
+      });
+    }
+
+    const isParticipant = await ChatService.isParticipant(message.chatRoomId.toString(), userId);
+    if (!isParticipant) {
+      return res.status(403).json({
+        error: {
+          code: 'FORBIDDEN',
+          message: 'You are not allowed to update message state',
+          timestamp: new Date().toISOString()
+        }
+      });
+    }
+
+    message.viewedByUsers = Array.isArray(message.viewedByUsers) ? message.viewedByUsers : [];
+    if (!message.viewedByUsers.some((id) => id.toString() === userId)) {
+      message.viewedByUsers.push(userId as any);
+      await message.save();
+    }
+
+    return res.json({
+      message: 'Message marked as viewed',
+      messageId: message._id
+    });
+  } catch (error: any) {
+    console.error('Mark message viewed error:', error);
+    return res.status(500).json({
+      error: {
+        code: 'INTERNAL_SERVER_ERROR',
+        message: 'An error occurred while updating message state',
+        timestamp: new Date().toISOString()
+      }
+    });
+  }
+};
+
+export const expireViewedUnsavedMessagesForMe = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).userId;
+    const { chatRoomId } = req.params;
+
+    const isParticipant = await ChatService.isParticipant(chatRoomId, userId);
+    if (!isParticipant) {
+      return res.status(403).json({
+        error: {
+          code: 'FORBIDDEN',
+          message: 'You are not allowed to update this chat',
+          timestamp: new Date().toISOString()
+        }
+      });
+    }
+
+    const receiverReadMessages = await Message.find({
+      chatRoomId,
+      deletedForEveryone: { $ne: true },
+      deletedForUsers: { $ne: userId },
+      savedForEveryone: { $ne: true },
+      read: true,
+      receiverId: userId
+    })
+      .select('_id senderId receiverId')
+      .lean();
+
+    if (receiverReadMessages.length === 0) {
+      return res.json({
+        message: 'Viewed unsaved messages expired',
+        chatRoomId,
+        expiredCount: 0
+      });
+    }
+
+    let expiredCount = 0;
+    const operations: any[] = [];
+    for (const msg of receiverReadMessages) {
+      const sender = String((msg as any).senderId || '');
+      const receiver = String((msg as any).receiverId || '');
+      const participants = Array.from(new Set([sender, receiver].filter(Boolean)));
+      if (participants.length === 0) continue;
+      expiredCount += 1;
+      operations.push({
+        updateOne: {
+          filter: { _id: (msg as any)._id },
+          update: { $addToSet: { deletedForUsers: { $each: participants } } }
+        }
+      });
+    }
+
+    if (operations.length > 0) {
+      await Message.bulkWrite(operations, { ordered: false });
+    }
+
+    return res.json({
+      message: 'Viewed unsaved messages expired',
+      chatRoomId,
+      expiredCount
+    });
+  } catch (error: any) {
+    console.error('Expire viewed unsaved messages error:', error);
+    return res.status(500).json({
+      error: {
+        code: 'INTERNAL_SERVER_ERROR',
+        message: 'An error occurred while expiring messages',
+        timestamp: new Date().toISOString()
+      }
+    });
+  }
+};
+
+export const markChatRead = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).userId;
+    const { chatRoomId } = req.params;
+
+    const isParticipant = await ChatService.isParticipant(chatRoomId, userId);
+    if (!isParticipant) {
+      return res.status(403).json({
+        error: {
+          code: 'FORBIDDEN',
+          message: 'You are not a participant in this chat',
+          timestamp: new Date().toISOString()
+        }
+      });
+    }
+
+    const result = await Message.updateMany(
+      {
+        chatRoomId,
+        receiverId: userId,
+        read: false,
+        deletedForEveryone: { $ne: true }
+      },
+      { read: true }
+    );
+
+    await Notification.deleteMany({
+      userId,
+      type: 'message',
+      'data.chatRoomId': chatRoomId
+    });
+
+    return res.json({
+      message: 'Chat marked as read',
+      chatRoomId,
+      updatedCount: Number(result.modifiedCount || 0)
+    });
+  } catch (error: any) {
+    console.error('Mark chat read error:', error);
+    return res.status(500).json({
+      error: {
+        code: 'INTERNAL_SERVER_ERROR',
+        message: 'An error occurred while marking chat as read',
         timestamp: new Date().toISOString()
       }
     });

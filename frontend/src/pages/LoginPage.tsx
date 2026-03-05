@@ -103,12 +103,12 @@ const LoginPage = () => {
           try {
             const response = await axios.post(`${API_URL}/api/auth/google`, {
               idToken: credential,
-              rememberMe: formData.rememberMe
+              rememberMe: true
             });
 
             localStorage.setItem('token', response.data.token);
             localStorage.setItem('userId', response.data.user.id);
-            localStorage.setItem('rememberMe', formData.rememberMe ? 'true' : 'false');
+            localStorage.setItem('rememberMe', 'true');
 
             try {
               await axios.get(`${API_URL}/api/profiles/${response.data.user.id}`, {

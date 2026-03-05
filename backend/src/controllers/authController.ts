@@ -291,7 +291,7 @@ export const logout = async (req: Request, res: Response) => {
 
 export const googleLogin = async (req: Request, res: Response) => {
   try {
-    const { idToken, rememberMe } = req.body;
+    const { idToken } = req.body;
 
     if (!idToken) {
       return res.status(400).json({
@@ -361,7 +361,8 @@ export const googleLogin = async (req: Request, res: Response) => {
       await user.save();
     }
 
-    const useRememberMe = Boolean(rememberMe);
+    // Google sign-in should stay active until explicit logout.
+    const useRememberMe = true;
     const tokenExpiry = useRememberMe ? REMEMBER_ME_JWT_EXPIRES_IN : undefined;
     const token = generateToken({
       userId: user._id.toString(),

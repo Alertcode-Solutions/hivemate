@@ -13,7 +13,7 @@ const createSocket = (token: string): Socket => {
     path: '/socket.io',
     transports: ['websocket', 'polling'],
     reconnection: true,
-    reconnectionAttempts: 20,
+    reconnectionAttempts: Infinity,
     reconnectionDelay: 500
   });
 

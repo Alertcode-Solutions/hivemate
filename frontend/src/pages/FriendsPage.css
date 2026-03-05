@@ -1,5 +1,10 @@
 .friends-page {
   min-height: 100vh;
+  min-height: 100dvh;
+  height: 100dvh;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;
   padding: 1rem 0 2.2rem;
   background:
     radial-gradient(980px 520px at 12% -8%, rgba(37, 99, 235, 0.2), transparent 68%),

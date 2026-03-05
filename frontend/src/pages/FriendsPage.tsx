@@ -51,6 +51,16 @@ const FriendsPage = () => {
     fetchFriends();
   }, [userId]);
 
+  useEffect(() => {
+    // Defensive reset in case chat lock leaked from previous route on mobile.
+    document.documentElement.classList.remove('route-chat-lock');
+    document.body.classList.remove('route-chat-lock');
+    document.documentElement.style.removeProperty('overflow');
+    document.body.style.removeProperty('overflow');
+    document.documentElement.style.overflowY = 'auto';
+    document.body.style.overflowY = 'auto';
+  }, []);
+
   const fetchFriends = async (forceRefresh = false) => {
     try {
       const token = localStorage.getItem('token');

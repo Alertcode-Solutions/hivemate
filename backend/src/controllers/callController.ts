@@ -136,9 +136,24 @@ export const initiateCall = async (req: Request, res: Response) => {
       ? await Profile.findOne({ userId: initiatorId })
       : null;
 
-    // Send call notification via WebSocket
+    // Ensure receiver is currently connected for real-time call signaling.
     try {
       const wsServer = getWebSocketServer();
+      if (!wsServer.isUserConnected(String(participantId))) {
+        await CallSession.findByIdAndUpdate(callSession._id, {
+          status: 'ended',
+          endedAt: new Date()
+        });
+        return res.status(409).json({
+          error: {
+            code: 'USER_OFFLINE',
+            message: 'User is offline right now. Try again when they are online.',
+            timestamp: new Date().toISOString()
+          }
+        });
+      }
+
+      // Send call notification via WebSocket
       wsServer.emitToUser(participantId, 'call:incoming', {
         callId: callSession._id,
         type,
@@ -250,6 +265,64 @@ export const endCall = async (req: Request, res: Response) => {
       error: {
         code: 'INTERNAL_SERVER_ERROR',
         message: 'An error occurred while ending call',
+        timestamp: new Date().toISOString()
+      }
+    });
+  }
+};
+
+export const getCallStatus = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).userId;
+    const { callId } = req.params;
+
+    const callSession = await CallSession.findById(callId);
+    if (!callSession) {
+      return res.status(404).json({
+        error: {
+          code: 'CALL_NOT_FOUND',
+          message: 'Call session not found',
+          timestamp: new Date().toISOString()
+        }
+      });
+    }
+
+    const isParticipant =
+      callSession.initiatorId.toString() === userId ||
+      callSession.participantIds.some((p) => p.toString() === userId);
+
+    if (!isParticipant) {
+      return res.status(403).json({
+        error: {
+          code: 'FORBIDDEN',
+          message: 'You are not a participant in this call',
+          timestamp: new Date().toISOString()
+        }
+      });
+    }
+
+    const status = callSession.status;
+    const active = status === 'ringing' || status === 'active';
+
+    res.json({
+      call: {
+        id: callSession._id,
+        type: callSession.type,
+        status,
+        active,
+        initiatorId: callSession.initiatorId,
+        participantIds: callSession.participantIds,
+        createdAt: callSession.createdAt,
+        startedAt: callSession.startedAt || null,
+        endedAt: callSession.endedAt || null
+      }
+    });
+  } catch (error: any) {
+    console.error('Get call status error:', error);
+    res.status(500).json({
+      error: {
+        code: 'INTERNAL_SERVER_ERROR',
+        message: 'An error occurred while fetching call status',
         timestamp: new Date().toISOString()
       }
     });

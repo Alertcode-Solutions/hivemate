@@ -94,12 +94,12 @@ const RegisterPage = () => {
           try {
             const response = await axios.post(`${API_URL}/api/auth/google`, {
               idToken: credential,
-              rememberMe: false
+              rememberMe: true
             });
 
             localStorage.setItem('token', response.data.token);
             localStorage.setItem('userId', response.data.user.id);
-            localStorage.setItem('rememberMe', 'false');
+            localStorage.setItem('rememberMe', 'true');
 
             try {
               await axios.get(`${API_URL}/api/profiles/${response.data.user.id}`, {
@@ -414,7 +414,12 @@ const RegisterPage = () => {
         ) : (
           <form onSubmit={handleVerifyOtp} className="auth-form">
             {error && <div className="error-message">{error}</div>}
-            {infoMessage && <div className="success-message">{infoMessage}</div>}
+            {infoMessage && (
+              <>
+                <div className="success-message">{infoMessage}</div>
+                <div className="otp-spam-note">Info: Check your spam folder for emails from MojoAuth.</div>
+              </>
+            )}
             {devOtpHint && <div className="dev-otp-hint">{devOtpHint}</div>}
             <div className="form-group">
               <label htmlFor="otp">OTP</label>

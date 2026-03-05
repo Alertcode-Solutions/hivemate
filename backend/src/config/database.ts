@@ -3,10 +3,15 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/socialhive';
+const DEFAULT_MONGODB_URI = 'mongodb://localhost:27017/socialhive';
+const RAW_MONGODB_URI = process.env.MONGODB_URI || DEFAULT_MONGODB_URI;
+const MONGODB_URI = RAW_MONGODB_URI.trim();
 
 export const connectDatabase = async (): Promise<void> => {
   try {
+    if (RAW_MONGODB_URI !== MONGODB_URI) {
+      console.warn('[DB] MONGODB_URI had surrounding whitespace and was sanitized.');
+    }
     await mongoose.connect(MONGODB_URI);
     console.log('✅ MongoDB connected successfully');
     

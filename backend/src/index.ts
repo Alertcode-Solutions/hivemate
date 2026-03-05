@@ -4,6 +4,7 @@ import http from 'http';
 import { connectDatabase } from './config/database';
 import redis from './config/redis';
 import { initializeWebSocket } from './websocket/server';
+import Message from './models/Message';
 
 dotenv.config();
 
@@ -115,6 +116,24 @@ const startServer = async () => {
   try {
     // Connect to databases
     await connectDatabase();
+
+    // Cleanup invalid legacy index (MongoDB cannot index parallel arrays).
+    try {
+      const indexes = await Message.collection.indexes();
+      const invalidParallelArrayIndexes = indexes
+        .filter((index: any) => {
+          const keyFields = Object.keys(index?.key || {});
+          return keyFields.includes('savedByUsers') && keyFields.includes('viewedByUsers');
+        })
+        .map((index: any) => String(index.name))
+        .filter(Boolean);
+      for (const indexName of invalidParallelArrayIndexes) {
+        await Message.collection.dropIndex(indexName);
+        console.log(`[DB] Dropped invalid message index: ${indexName}`);
+      }
+    } catch (indexError) {
+      console.warn('[DB] Message index cleanup skipped:', indexError);
+    }
     
     // Test Redis connection
     await redis.ping();

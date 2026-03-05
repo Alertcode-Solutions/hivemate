@@ -12,6 +12,9 @@ export interface IMessage extends Document {
   read: boolean;
   deletedForEveryone: boolean;
   deletedForUsers: mongoose.Types.ObjectId[];
+  savedForEveryone: boolean;
+  exitedByUsers: mongoose.Types.ObjectId[];
+  viewedByUsers: mongoose.Types.ObjectId[];
   deletedAt?: Date;
   reactions: Array<{
     userId: mongoose.Types.ObjectId;
@@ -66,6 +69,18 @@ const MessageSchema: Schema = new Schema({
     default: false
   },
   deletedForUsers: [{
+    type: Schema.Types.ObjectId,
+    ref: 'User'
+  }],
+  savedForEveryone: {
+    type: Boolean,
+    default: false
+  },
+  exitedByUsers: [{
+    type: Schema.Types.ObjectId,
+    ref: 'User'
+  }],
+  viewedByUsers: [{
     type: Schema.Types.ObjectId,
     ref: 'User'
   }],

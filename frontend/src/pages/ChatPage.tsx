@@ -7,6 +7,7 @@ import { getApiBaseUrl } from '../utils/runtimeConfig';
 import { acquireSharedSocket, releaseSharedSocket } from '../utils/socketManager';
 import { goToProfile } from '../utils/profileRouting';
 import BeeLoader from '../components/BeeLoader';
+import LoadingDots from '../components/LoadingDots';
 import useSmoothLoader from '../hooks/useSmoothLoader';
 import './ChatPage.css';
 
@@ -33,6 +34,7 @@ interface Message {
   senderId: string;
   receiverId: string;
   encryptedContent: string;
+  savedByCurrentUser?: boolean;
   replyToMessageId?: string | null;
   timestamp: Date;
   delivered: boolean;
@@ -57,6 +59,7 @@ const SWIPE_REPLY_THRESHOLD = 40;
 const MAX_SWIPE_DISTANCE = 60;
 const PREVIEW_REPLY_CHARS = 90;
 const AUTO_SCROLL_BOTTOM_EPSILON = 100;
+const REDIRECT_OPEN_MIN_BUFFER_MS = 380;
 
 type MessageActionSheetState = {
   messageId: string;
@@ -117,6 +120,33 @@ const VideoCallIcon = () => (
   <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
     <rect x="3.8" y="6.5" width="11.5" height="11" rx="2.2" fill="none" stroke="currentColor" strokeWidth="1.8" />
     <path d="M15.3 10.2 20.2 7.7v8.6l-4.9-2.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+
+const BookmarkIcon = () => (
+  <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <path
+      d="M7 3.5A1.5 1.5 0 0 0 5.5 5v15.2c0 .5.58.78.98.47L12 16.3l5.52 4.39c.4.31.98.03.98-.47V5A1.5 1.5 0 0 0 17 3.5H7Z"
+      fill="currentColor"
+    />
+  </svg>
+);
+
+const EmojiFaceIcon = () => (
+  <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <circle cx="12" cy="12" r="8.2" fill="none" stroke="currentColor" strokeWidth="2" />
+    <circle cx="9.3" cy="10.1" r="1" fill="currentColor" />
+    <circle cx="14.7" cy="10.1" r="1" fill="currentColor" />
+    <path d="M8.7 14.1c.85 1.15 1.93 1.7 3.3 1.7 1.37 0 2.45-.55 3.3-1.7" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
+  </svg>
+);
+
+const SendArrowIcon = () => (
+  <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <path
+      d="M2.7 6.2c0-.95.96-1.58 1.83-1.2l16.44 7.2a1.3 1.3 0 0 1 0 2.38L4.53 21.8A1.3 1.3 0 0 1 2.7 20.6l.84-5.33a1 1 0 0 1 .83-.83l8.53-1.2-8.53-1.2a1 1 0 0 1-.83-.84L2.7 6.2Z"
+      fill="currentColor"
+    />
   </svg>
 );
 
@@ -183,6 +213,8 @@ const ChatPage = () => {
   const [peerLastSeen, setPeerLastSeen] = useState<string>('');
   const [showScrollToBottomButton, setShowScrollToBottomButton] = useState(false);
   const [chatOpenError, setChatOpenError] = useState('');
+  const [redirectOpenLoading, setRedirectOpenLoading] = useState(false);
+  const [redirectPendingSelection, setRedirectPendingSelection] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement | null>(null);
   const wsRef = useRef<Socket | null>(null);
@@ -232,6 +264,8 @@ const ChatPage = () => {
   const deletedMessageTombstonesRef = useRef<Record<string, number>>({});
   const sendingInFlightRef = useRef(false);
   const messagesAbortControllerRef = useRef<AbortController | null>(null);
+  const openDirectChatInFlightRef = useRef<string>('');
+  const redirectOpenStartedAtRef = useRef<number>(0);
   const reactionMutationInFlightRef = useRef<Record<string, boolean>>({});
   const reactionSocketDebounceTimersRef = useRef<Record<string, number>>({});
   const reactionSocketPendingRef = useRef<
@@ -245,6 +279,7 @@ const ChatPage = () => {
   const currentUserId = localStorage.getItem('userId');
   const roomFromQuery = new URLSearchParams(location.search).get('room');
   const userFromQuery = new URLSearchParams(location.search).get('user');
+  const hasDeepLinkTarget = Boolean(roomFromQuery || userFromQuery || friendshipId);
   const navigationState = (location.state as { from?: string } | null) || null;
   const returnPath =
     typeof navigationState?.from === 'string' &&
@@ -379,6 +414,7 @@ const ChatPage = () => {
       if (Boolean(a.delivered) !== Boolean(b.delivered)) return false;
       if (Boolean(a.read) !== Boolean(b.read)) return false;
       if (Boolean(a.deletedForEveryone) !== Boolean(b.deletedForEveryone)) return false;
+      if (Boolean(a.savedByCurrentUser) !== Boolean(b.savedByCurrentUser)) return false;
       const aReactions = (a.reactions || [])
         .map((reaction) => `${normalizeId(reaction.userId)}:${reaction.emoji}:${new Date(reaction.reactedAt || 0).getTime()}`)
         .sort();
@@ -473,7 +509,17 @@ const ChatPage = () => {
   const openChatRoom = (room: ChatRoom, options?: { pushMobileHistory?: boolean }) => {
     setChatActionSheet(null);
     setChatOpenError('');
+    setRedirectOpenLoading(false);
+    setRedirectPendingSelection(false);
+    delete deletedChatTombstonesRef.current[String(room.chatRoomId)];
     setSelectedChatRoom(room);
+    setChatRooms((prev) =>
+      prev.map((entry) =>
+        String(entry.chatRoomId) === String(room.chatRoomId)
+          ? { ...entry, unreadCount: 0 }
+          : entry
+      )
+    );
     if (isMobileView) {
       setShowSidebarOnMobile(false);
       if (options?.pushMobileHistory !== false) {
@@ -487,7 +533,26 @@ const ChatPage = () => {
     goToProfile(navigate, userId);
   };
 
+  const expireViewedUnsavedMessagesForRoom = async (chatRoomId: string) => {
+    const roomId = String(chatRoomId || '');
+    if (!roomId) return;
+    try {
+      const token = localStorage.getItem('token');
+      if (!token) return;
+      await fetch(`${API_URL}/api/messages/chat/${roomId}/exit`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` }
+      });
+    } catch (error) {
+      console.error('Expire viewed unsaved messages failed:', error);
+    }
+  };
+
   const leaveChatPage = () => {
+    const activeRoomId = String(selectedChatRoomRef.current?.chatRoomId || '');
+    if (activeRoomId) {
+      void expireViewedUnsavedMessagesForRoom(activeRoomId);
+    }
     if (returnPath) {
       navigate(returnPath);
       return;
@@ -504,6 +569,9 @@ const ChatPage = () => {
   const resolveChatTargetUserId = async (rawTargetId: string) => {
     const normalizedTargetId = normalizeId(rawTargetId);
     if (!normalizedTargetId) return '';
+    if (/^[a-fA-F0-9]{24}$/.test(normalizedTargetId)) {
+      return normalizedTargetId;
+    }
     const token = localStorage.getItem('token');
     if (!token) return normalizedTargetId;
 
@@ -583,8 +651,23 @@ const ChatPage = () => {
       replyTargetLockRef.current = null;
       setReactionSheetMessageId(null);
       loadMessages(selectedChatRoom.chatRoomId);
+      const token = localStorage.getItem('token');
+      if (token) {
+        void fetch(`${API_URL}/api/messages/chat/${roomId}/read`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}` }
+        }).catch(() => undefined);
+      }
     }
   }, [selectedChatRoom]);
+
+  useEffect(() => {
+    const activeRoomId = String(selectedChatRoom?.chatRoomId || '');
+    return () => {
+      if (!activeRoomId) return;
+      void expireViewedUnsavedMessagesForRoom(activeRoomId);
+    };
+  }, [selectedChatRoom?.chatRoomId]);
 
   useEffect(() => {
     const roomId = String(selectedChatRoom?.chatRoomId || '');
@@ -645,6 +728,42 @@ const ChatPage = () => {
       }
     }
   }, [location.search, isMobileView, chatRooms, selectedChatRoom, friendshipId]);
+
+  useEffect(() => {
+    if (!hasDeepLinkTarget) {
+      setRedirectPendingSelection(false);
+      return;
+    }
+    setRedirectPendingSelection(!Boolean(selectedChatRoom));
+  }, [hasDeepLinkTarget, selectedChatRoom]);
+
+  useEffect(() => {
+    const tryProactiveRedirectOpen = async () => {
+      if (selectedChatRoomRef.current) {
+        setRedirectOpenLoading(false);
+        setRedirectPendingSelection(false);
+        return;
+      }
+      setRedirectOpenLoading(true);
+      setRedirectPendingSelection(true);
+      const userIdFromUrl = normalizeId(new URLSearchParams(location.search).get('user'));
+      const pathTargetId = normalizeId(friendshipId);
+      const fallbackTarget = normalizeId(userIdFromUrl || pathTargetId);
+      if (!fallbackTarget) {
+        return;
+      }
+      if (openDirectChatInFlightRef.current === fallbackTarget) return;
+      const resolvedTargetId = await resolveChatTargetUserId(fallbackTarget);
+      await openDirectChat(resolvedTargetId, { fromRedirect: true });
+    };
+
+    if (!hasDeepLinkTarget) {
+      setRedirectOpenLoading(false);
+      setRedirectPendingSelection(false);
+      return;
+    }
+    void tryProactiveRedirectOpen();
+  }, [location.search, friendshipId, hasDeepLinkTarget]);
 
   useEffect(() => {
     if (!('serviceWorker' in navigator)) return;
@@ -793,6 +912,10 @@ const ChatPage = () => {
     const handlePopState = () => {
       if (!isMobileView) return;
       if (showSidebarOnMobile) return;
+      const activeRoomId = String(selectedChatRoomRef.current?.chatRoomId || '');
+      if (activeRoomId) {
+        void expireViewedUnsavedMessagesForRoom(activeRoomId);
+      }
       setShowSidebarOnMobile(true);
       setActionSheet(null);
       setChatActionSheet(null);
@@ -992,12 +1115,16 @@ const ChatPage = () => {
           keyPair.privateKey
         );
 
-        if (selectedChatRoomRef.current && data.chatRoomId === selectedChatRoomRef.current.chatRoomId) {
+        const isActiveRoom = Boolean(
+          selectedChatRoomRef.current && data.chatRoomId === selectedChatRoomRef.current.chatRoomId
+        );
+        if (isActiveRoom) {
           const newMessage: Message = {
             id: incomingMessageId,
             senderId: data.senderId,
             receiverId: currentUserId!,
             encryptedContent: decryptedContent,
+            savedByCurrentUser: false,
             replyToMessageId: data.replyToMessageId || null,
             timestamp: new Date(data.timestamp),
             delivered: true,
@@ -1005,6 +1132,17 @@ const ChatPage = () => {
             reactions: []
           };
           appendMessageDedup(newMessage);
+          const token = localStorage.getItem('token');
+          if (token && incomingMessageId && normalizeId(data.senderId) !== currentUserIdStr) {
+            void fetch(`${API_URL}/api/messages/${incomingMessageId}/viewed`, {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${token}` }
+            }).catch(() => undefined);
+            void fetch(`${API_URL}/api/messages/chat/${incomingRoomId}/read`, {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${token}` }
+            }).catch(() => undefined);
+          }
           if (normalizeId(data.senderId) === currentUserIdStr) {
             forceScrollToBottomRef.current = true;
             isAtBottomRef.current = true;
@@ -1028,7 +1166,7 @@ const ChatPage = () => {
             },
             lastMessageAt: new Date(data.timestamp),
             unreadCount:
-              selectedChatRoomRef.current && String(selectedChatRoomRef.current.chatRoomId) === incomingRoomId
+              isActiveRoom || normalizeId(data.senderId) === currentUserIdStr
                 ? 0
                 : Number(room.unreadCount || 0) + 1
           };
@@ -1036,12 +1174,16 @@ const ChatPage = () => {
           return updated;
         });
       } catch (error) {
-        if (selectedChatRoomRef.current && data.chatRoomId === selectedChatRoomRef.current.chatRoomId) {
+        const isActiveRoom = Boolean(
+          selectedChatRoomRef.current && data.chatRoomId === selectedChatRoomRef.current.chatRoomId
+        );
+        if (isActiveRoom) {
           const unreadableMessage: Message = {
             id: incomingMessageId,
             senderId: data.senderId,
             receiverId: currentUserId!,
             encryptedContent: CIPHERTEXT_PLACEHOLDER,
+            savedByCurrentUser: false,
             replyToMessageId: data.replyToMessageId || null,
             timestamp: new Date(data.timestamp),
             delivered: true,
@@ -1063,7 +1205,7 @@ const ChatPage = () => {
             ...room,
             lastMessageAt: new Date(data.timestamp),
             unreadCount:
-              selectedChatRoomRef.current && String(selectedChatRoomRef.current.chatRoomId) === incomingRoomId
+              isActiveRoom || normalizeId(data.senderId) === currentUserIdStr
                 ? 0
                 : Number(room.unreadCount || 0) + 1
           };
@@ -1077,13 +1219,22 @@ const ChatPage = () => {
     };
 
     const handleDeletedForEveryone = (data: any) => {
+      const deletedId = normalizeId(data?.messageId);
+      const deletedRoomId = String(data?.chatRoomId || '');
       setMessages((prev) =>
         prev.map((msg) =>
-          String(msg.id) === String(data.messageId)
+          normalizeId(msg.id) === deletedId
             ? { ...msg, encryptedContent: DELETED_MESSAGE_TEXT, deletedForEveryone: true }
             : msg
         )
       );
+      if (deletedRoomId) {
+        roomMessagesCacheRef.current[deletedRoomId] = (roomMessagesCacheRef.current[deletedRoomId] || []).map((msg) =>
+          normalizeId(msg.id) === deletedId
+            ? { ...msg, encryptedContent: DELETED_MESSAGE_TEXT, deletedForEveryone: true }
+            : msg
+        );
+      }
     };
 
     const handleMessageReaction = (data: any) => {
@@ -1102,6 +1253,28 @@ const ChatPage = () => {
               reactedAt: reaction.reactedAt
             }))
           : []
+      );
+    };
+
+    const handleMessageSavedState = (data: any) => {
+      const messageId = normalizeId(data?.messageId);
+      const incomingChatRoomId = String(data?.chatRoomId || '');
+      if (!messageId || !incomingChatRoomId) return;
+      const saved = Boolean(data?.savedForEveryone);
+
+      setMessages((prev) =>
+        prev.map((message) =>
+          normalizeId(message.id) === messageId
+            ? { ...message, savedByCurrentUser: saved }
+            : message
+        )
+      );
+
+      const cached = roomMessagesCacheRef.current[incomingChatRoomId] || [];
+      roomMessagesCacheRef.current[incomingChatRoomId] = cached.map((message) =>
+        normalizeId(message.id) === messageId
+          ? { ...message, savedByCurrentUser: saved }
+          : message
       );
     };
 
@@ -1139,6 +1312,7 @@ const ChatPage = () => {
     socket.on('typing:start', handleTypingStart);
     socket.on('typing:stop', handleTypingStop);
     socket.on('message:reaction', handleMessageReaction);
+    socket.on('message:saved_state', handleMessageSavedState);
     socket.on('presence:update', handlePresenceUpdate);
 
     wsRef.current = socket;
@@ -1152,6 +1326,7 @@ const ChatPage = () => {
       socket.off('typing:start', handleTypingStart);
       socket.off('typing:stop', handleTypingStop);
       socket.off('message:reaction', handleMessageReaction);
+      socket.off('message:saved_state', handleMessageSavedState);
       socket.off('presence:update', handlePresenceUpdate);
       releaseSharedSocket();
       wsRef.current = null;
@@ -1194,7 +1369,19 @@ const ChatPage = () => {
           }
           // Keep mobile chat pane open for deep links even before room data resolves.
           setShowSidebarOnMobile(false);
-          console.warn('[ChatPage] Deep-linked room not found in chat list response yet:', normalizedRoomId);
+          const fallbackTargetFromUser = normalizeId(normalizedUserId);
+          const fallbackTargetFromPath = friendshipId
+            ? await resolveChatTargetUserId(normalizeId(friendshipId))
+            : '';
+          const fallbackTargetId = normalizeId(fallbackTargetFromUser || fallbackTargetFromPath);
+          if (fallbackTargetId) {
+            if (openedUserQueryRef.current !== fallbackTargetId) {
+              openedUserQueryRef.current = fallbackTargetId;
+              await openDirectChat(fallbackTargetId);
+            }
+            return;
+          }
+          console.warn('[ChatPage] Deep-linked room not found and no fallback user target:', normalizedRoomId);
         }
 
         if (!normalizedRoomId && normalizedUserId && chats.length > 0) {
@@ -1242,11 +1429,20 @@ const ChatPage = () => {
     }
   };
 
-  const openDirectChat = async (targetUserId: string): Promise<boolean> => {
+  const openDirectChat = async (
+    targetUserId: string,
+    options?: { fromRedirect?: boolean }
+  ): Promise<boolean> => {
     try {
       const token = localStorage.getItem('token');
       const normalizedTargetUserId = normalizeId(targetUserId);
       if (!token || !normalizedTargetUserId) return false;
+      if (openDirectChatInFlightRef.current === normalizedTargetUserId) return false;
+      openDirectChatInFlightRef.current = normalizedTargetUserId;
+      if (options?.fromRedirect) {
+        redirectOpenStartedAtRef.current = Date.now();
+        setRedirectOpenLoading(true);
+      }
 
       const response = await fetch(`${API_URL}/api/messages/open/${normalizedTargetUserId}`, {
         method: 'POST',
@@ -1256,19 +1452,27 @@ const ChatPage = () => {
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
         setChatOpenError(errorData?.error?.message || 'Unable to open this chat right now.');
+        setRedirectPendingSelection(false);
         return false;
       }
       const data = await response.json();
       const openedChat = data?.chat;
       if (!openedChat) {
         setChatOpenError('Unable to open this chat right now.');
+        setRedirectPendingSelection(false);
         return false;
       }
+      delete deletedChatTombstonesRef.current[String(openedChat.chatRoomId)];
 
       setChatRooms((prev) => {
         const exists = prev.some((room) => String(room.chatRoomId) === String(openedChat.chatRoomId));
-        if (exists) return prev;
-        return [openedChat, ...prev];
+        const merged = exists
+          ? prev.map((room) =>
+              String(room.chatRoomId) === String(openedChat.chatRoomId) ? openedChat : room
+            )
+          : [openedChat, ...prev];
+        localStorage.setItem(chatRoomsCacheKey, JSON.stringify(merged));
+        return merged;
       });
 
       void hydrateParticipantPhotos([openedChat]);
@@ -1278,8 +1482,21 @@ const ChatPage = () => {
       return true;
     } catch (error) {
       console.error('Failed to open direct chat:', error);
+      openedUserQueryRef.current = '';
       setChatOpenError('Unable to open this chat right now.');
+      setRedirectPendingSelection(false);
       return false;
+    } finally {
+      openDirectChatInFlightRef.current = '';
+      if (options?.fromRedirect) {
+        const elapsed = Date.now() - redirectOpenStartedAtRef.current;
+        const remaining = Math.max(0, REDIRECT_OPEN_MIN_BUFFER_MS - elapsed);
+        if (remaining > 0) {
+          window.setTimeout(() => setRedirectOpenLoading(false), remaining);
+        } else {
+          setRedirectOpenLoading(false);
+        }
+      }
     }
   };
 
@@ -1356,7 +1573,11 @@ const ChatPage = () => {
               const normalizedMessageId = normalizeId(msg.id);
               const cacheEntry = decryptedMessageCacheRef.current[normalizedMessageId];
               if (cacheEntry && cacheEntry.cipher === msg.encryptedContent) {
-                return { ...msg, encryptedContent: cacheEntry.text };
+                return {
+                  ...msg,
+                  encryptedContent: cacheEntry.text,
+                  savedByCurrentUser: Boolean((msg as any).savedByCurrentUser)
+                };
               }
               const decryptedContent = await EncryptionService.decryptMessage(
                 msg.encryptedContent,
@@ -1366,12 +1587,20 @@ const ChatPage = () => {
                 cipher: msg.encryptedContent,
                 text: decryptedContent
               };
-              return { ...msg, encryptedContent: decryptedContent };
+              return {
+                ...msg,
+                encryptedContent: decryptedContent,
+                savedByCurrentUser: Boolean((msg as any).savedByCurrentUser)
+              };
             } catch {
               if (msg.deletedForEveryone) {
                 return { ...msg, encryptedContent: DELETED_MESSAGE_TEXT, deletedForEveryone: true };
               }
-              return { ...msg, encryptedContent: CIPHERTEXT_PLACEHOLDER };
+              return {
+                ...msg,
+                encryptedContent: CIPHERTEXT_PLACEHOLDER,
+                savedByCurrentUser: Boolean((msg as any).savedByCurrentUser)
+              };
             }
           })
         );
@@ -1449,6 +1678,7 @@ const ChatPage = () => {
         senderId: currentUserId!,
         receiverId,
         encryptedContent: sanitizedMessage,
+        savedByCurrentUser: false,
         replyToMessageId: replyContext?.messageId || null,
         timestamp: new Date(),
         delivered: false,
@@ -1488,14 +1718,10 @@ const ChatPage = () => {
           receiverId,
           token!
         );
-        encryptedContent = await EncryptionService.encryptMessage(
-          sanitizedMessage,
-          recipientPublicKey
-        );
-        senderEncryptedContent = await EncryptionService.encryptMessage(
-          sanitizedMessage,
-          keyPair.publicKey
-        );
+        [encryptedContent, senderEncryptedContent] = await Promise.all([
+          EncryptionService.encryptMessage(sanitizedMessage, recipientPublicKey),
+          EncryptionService.encryptMessage(sanitizedMessage, keyPair.publicKey)
+        ]);
       } catch (error) {
         console.error('Encryption failed:', error);
         alert('Could not encrypt message. Please refresh and try again.');
@@ -1531,6 +1757,7 @@ const ChatPage = () => {
             senderId: currentUserId!,
             receiverId,
             encryptedContent: sanitizedMessage,
+            savedByCurrentUser: false,
             replyToMessageId: replyContext?.messageId || null,
             timestamp: new Date(data.messageData.timestamp),
             delivered: Boolean(data.messageData.delivered),
@@ -1564,10 +1791,7 @@ const ChatPage = () => {
   };
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      sendMessage();
-    }
+    if (e.key === 'Enter') return;
   };
 
   const handleInputPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
@@ -1806,6 +2030,13 @@ const ChatPage = () => {
   const myReactionOnActionSheetMessage = actionSheetMessage ? myReactionForMessage(actionSheetMessage) : '';
   const actionSheetMessageIsDeletedForEveryone = Boolean(actionSheetMessage?.deletedForEveryone);
   const actionSheetCanDeleteForEveryone = Boolean(actionSheet?.isOwn && !actionSheetMessageIsDeletedForEveryone);
+  const actionSheetMessageIsSaved = Boolean(actionSheetMessage?.savedByCurrentUser);
+  const actionSheetCanToggleSave = Boolean(
+    actionSheetMessage &&
+    !actionSheetMessageIsDeletedForEveryone &&
+    String(actionSheetMessage.encryptedContent || '').trim().length > 0 &&
+    String(actionSheetMessage.encryptedContent || '').trim() !== DELETED_MESSAGE_TEXT
+  );
   const actionSheetCanCopy = Boolean(
     actionSheetMessage &&
     !actionSheetMessageIsDeletedForEveryone &&
@@ -2047,13 +2278,11 @@ const ChatPage = () => {
     ? selectedChatRoom.participants.find((p) => String(p.userId) !== currentUserIdStr)
     : null;
 
-  const headerPresenceText = isPeerTyping
-    ? 'Typing...'
-    : peerOnline
-      ? 'Online'
-      : peerLastSeen
-        ? `Last seen ${peerLastSeen}`
-        : 'Offline';
+  const headerPresenceText = peerOnline
+    ? 'Online'
+    : peerLastSeen
+      ? `Last seen ${peerLastSeen}`
+      : 'Offline';
 
   const buildActionSheetPosition = (
     rect: DOMRect,
@@ -2503,7 +2732,7 @@ const ChatPage = () => {
     deleteForEveryoneInFlightRef.current[messageId] = true;
     setActionSheet(null);
     setFocusedMessageId(null);
-    const previousMessage = messages.find((message) => normalizeId(message.id) === messageId) || null;
+    const activeRoomId = String(selectedChatRoomRef.current?.chatRoomId || '');
     setMessages((prev) =>
       prev.map((m) =>
         normalizeId(m.id) === messageId
@@ -2511,6 +2740,13 @@ const ChatPage = () => {
           : m
       )
     );
+    if (activeRoomId) {
+      roomMessagesCacheRef.current[activeRoomId] = (roomMessagesCacheRef.current[activeRoomId] || []).map((m) =>
+        normalizeId(m.id) === messageId
+          ? { ...m, encryptedContent: DELETED_MESSAGE_TEXT, deletedForEveryone: true }
+          : m
+      );
+    }
     if (replyTargetLockRef.current?.messageId === messageId) {
       replyTargetLockRef.current = null;
       setReplyTarget(null);
@@ -2523,25 +2759,69 @@ const ChatPage = () => {
       });
 
       if (!response.ok) {
-        if (previousMessage) {
-          setMessages((prev) =>
-            prev.map((message) =>
-              normalizeId(message.id) === messageId ? previousMessage : message
-            )
-          );
+        if (selectedChatRoomRef.current) {
+          void loadMessages(String(selectedChatRoomRef.current.chatRoomId));
         }
       }
     } catch (error) {
       console.error('Delete for everyone failed:', error);
-      if (previousMessage) {
-        setMessages((prev) =>
-          prev.map((message) =>
-            normalizeId(message.id) === messageId ? previousMessage : message
-          )
-        );
+      if (selectedChatRoomRef.current) {
+        void loadMessages(String(selectedChatRoomRef.current.chatRoomId));
       }
     } finally {
       deleteForEveryoneInFlightRef.current[messageId] = false;
+    }
+  };
+
+  const toggleSaveMessage = async () => {
+    if (!actionSheetMessage) return;
+    const messageId = normalizeId(actionSheetMessage.id);
+    if (!messageId) return;
+    const willSave = !Boolean(actionSheetMessage.savedByCurrentUser);
+    const activeRoomId = String(selectedChatRoomRef.current?.chatRoomId || '');
+    setActionSheet(null);
+    setFocusedMessageId(null);
+    setMessages((prev) =>
+      prev.map((message) =>
+        normalizeId(message.id) === messageId
+          ? { ...message, savedByCurrentUser: willSave }
+          : message
+      )
+    );
+    if (activeRoomId) {
+      roomMessagesCacheRef.current[activeRoomId] = (roomMessagesCacheRef.current[activeRoomId] || []).map((message) =>
+        normalizeId(message.id) === messageId
+          ? { ...message, savedByCurrentUser: willSave }
+          : message
+      );
+    }
+
+    try {
+      const token = localStorage.getItem('token');
+      if (!token) throw new Error('Missing auth token');
+      const response = await fetch(`${API_URL}/api/messages/${messageId}/save`, {
+        method: willSave ? 'PUT' : 'DELETE',
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (!response.ok) {
+        throw new Error('Failed to update save state');
+      }
+    } catch (error) {
+      console.error('Toggle save message failed:', error);
+      setMessages((prev) =>
+        prev.map((message) =>
+          normalizeId(message.id) === messageId
+            ? { ...message, savedByCurrentUser: !willSave }
+            : message
+        )
+      );
+      if (activeRoomId) {
+        roomMessagesCacheRef.current[activeRoomId] = (roomMessagesCacheRef.current[activeRoomId] || []).map((message) =>
+          normalizeId(message.id) === messageId
+            ? { ...message, savedByCurrentUser: !willSave }
+            : message
+        );
+      }
     }
   };
 
@@ -2667,14 +2947,17 @@ const ChatPage = () => {
               <div className="chat-window-header">
                 <div className="chat-header-primary">
                   {isMobileView && (
-                    <button
-                      className="back-to-chats-button"
-                      onClick={() => {
-                        if (window.history.state?.chatPanel) {
-                          window.history.back();
-                        } else if (returnPath) {
-                          leaveChatPage();
-                        } else {
+	                    <button
+	                      className="back-to-chats-button"
+	                      onClick={() => {
+	                        if (selectedChatRoomRef.current?.chatRoomId) {
+	                          void expireViewedUnsavedMessagesForRoom(String(selectedChatRoomRef.current.chatRoomId));
+	                        }
+	                        if (window.history.state?.chatPanel) {
+	                          window.history.back();
+	                        } else if (returnPath) {
+	                          leaveChatPage();
+	                        } else {
                           setShowSidebarOnMobile(true);
                         }
                       }}
@@ -2713,9 +2996,7 @@ const ChatPage = () => {
                       <span className="chat-header-subline">
                         {activeMatchBadge && <span className="typing-indicator">{`Matched \u{1F496}`}</span>}
                       </span>
-                      <span className={`typing-indicator ${isPeerTyping ? 'typing-live' : ''}`}>
-                        {headerPresenceText}
-                      </span>
+                      <span className="typing-indicator">{headerPresenceText}</span>
                     </span>
                   </button>
                 </div>
@@ -2827,16 +3108,34 @@ const ChatPage = () => {
                             )}
                             <span className="message-text">{renderMessageContent(message.encryptedContent)}</span>
                             <div className="message-meta internal-meta">
-                              <span className="message-time">
-                                {formatTime(message.timestamp)}
-                              </span>
-                              {isOwnMessage && (
-                                <span
-                                  className={`message-status ${message.read ? 'read' : message.delivered ? 'delivered' : 'sent'}`}
-                                  aria-label={message.read ? 'Read' : message.delivered ? 'Delivered' : 'Sent'}
-                                >
-                                  <MessageStatusTicks status={message.read ? 'read' : message.delivered ? 'delivered' : 'sent'} />
-                                </span>
+                              {isOwnMessage ? (
+                                <>
+                                  <span className="message-time">
+                                    {formatTime(message.timestamp)}
+                                  </span>
+                                  {message.savedByCurrentUser && (
+                                    <span className="message-saved-icon" title="Saved message" aria-label="Saved message">
+                                      <BookmarkIcon />
+                                    </span>
+                                  )}
+                                  <span
+                                    className={`message-status ${message.read ? 'read' : message.delivered ? 'delivered' : 'sent'}`}
+                                    aria-label={message.read ? 'Read' : message.delivered ? 'Delivered' : 'Sent'}
+                                  >
+                                    <MessageStatusTicks status={message.read ? 'read' : message.delivered ? 'delivered' : 'sent'} />
+                                  </span>
+                                </>
+                              ) : (
+                                <>
+                                  {message.savedByCurrentUser && (
+                                    <span className="message-saved-icon" title="Saved message" aria-label="Saved message">
+                                      <BookmarkIcon />
+                                    </span>
+                                  )}
+                                  <span className="message-time">
+                                    {formatTime(message.timestamp)}
+                                  </span>
+                                </>
                               )}
                             </div>
                           </div>
@@ -2875,8 +3174,14 @@ const ChatPage = () => {
                   ↓
                 </button>
               )}
-
               <div className="message-input-container">
+                <div
+                  className={`chat-typing-strip ${isPeerTyping ? 'is-visible' : ''}`}
+                  aria-label="Typing"
+                  aria-hidden={!isPeerTyping}
+                >
+                  {isPeerTyping && <LoadingDots label="" className="chat-typing-dots" />}
+                </div>
                 {replyTarget && (
                   <div
                     className={`reply-preview ${replyTarget.isOwn ? 'reply-preview-own' : 'reply-preview-other'}`}
@@ -2900,103 +3205,113 @@ const ChatPage = () => {
                     </button>
                   </div>
                 )}
-                <button
-                  type="button"
-                  className="emoji-toggle-btn"
-                  onPointerDown={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                  }}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setShowEmojiPicker((prev) => {
-                      const next = !prev;
-                      if (next) {
-                        const currentKeyboardOffset = Math.max(getCurrentKeyboardOffset(), keyboardOffsetRef.current);
-                        keyboardHoldOffsetRef.current = Math.max(
-                          keyboardHoldOffsetRef.current,
-                          currentKeyboardOffset
-                        );
-                        document.documentElement.style.setProperty(
-                          '--chat-keyboard-offset',
-                          `${keyboardHoldOffsetRef.current}px`
-                        );
-                      } else if (!keyboardVisibleRef.current) {
-                        keyboardHoldOffsetRef.current = 0;
-                      }
-                      if (isAtBottomRef.current) {
-                        requestAnimationFrame(() => scrollToBottom());
-                      }
-                      return next;
-                    });
-                  }}
-                  aria-label="Open emoji picker"
-                >
-                  {'\u{1F642}'}
-                </button>
-                {showEmojiPicker && (
-                  <div
-                    className="emoji-picker-panel"
-                    role="dialog"
-                    aria-label="Emoji picker"
-                    onClick={(e) => e.stopPropagation()}
+                <div className="composer-row">
+                  <button
+                    type="button"
+                    className="emoji-toggle-btn"
+                    onPointerDown={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                    }}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setShowEmojiPicker((prev) => {
+                        const next = !prev;
+                        if (next) {
+                          const currentKeyboardOffset = Math.max(getCurrentKeyboardOffset(), keyboardOffsetRef.current);
+                          keyboardHoldOffsetRef.current = Math.max(
+                            keyboardHoldOffsetRef.current,
+                            currentKeyboardOffset
+                          );
+                          document.documentElement.style.setProperty(
+                            '--chat-keyboard-offset',
+                            `${keyboardHoldOffsetRef.current}px`
+                          );
+                        } else if (!keyboardVisibleRef.current) {
+                          keyboardHoldOffsetRef.current = 0;
+                        }
+                        if (isAtBottomRef.current) {
+                          requestAnimationFrame(() => scrollToBottom());
+                        }
+                        return next;
+                      });
+                    }}
+                    aria-label="Open emoji picker"
                   >
-                    {QUICK_EMOJIS.map((emoji) => (
-                      <button
-                        key={`quick-emoji-${emoji}`}
-                        type="button"
-                        className="emoji-option-btn"
-                        onClick={() => addEmojiToInput(emoji)}
-                      >
-                        {emoji}
-                      </button>
-                    ))}
-                  </div>
-                )}
-                <textarea
-                  ref={messageInputRef}
-                  className="message-input"
-                  placeholder="Type a message..."
-                  value={messageInput}
-                  onChange={(e) => handleMessageInputChange(e.target.value)}
-                  onFocus={() => {
-                    if (!isMobileView) return;
-                    inputFocusedRef.current = true;
-                    setChatViewportHeight();
-                    const viewport = window.visualViewport;
-                    const keyboardOffset = viewport
-                      ? Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop)
-                      : 0;
-                    applyKeyboardOffset(keyboardOffset);
-                    forceScrollToBottom();
-                    window.setTimeout(() => scrollToBottom(), 40);
-                    window.setTimeout(() => scrollToBottom(), 120);
-                  }}
-                  onBlur={() => {
-                    inputFocusedRef.current = false;
-                  }}
-                  onKeyDown={handleKeyPress}
-                  onPaste={handleInputPaste}
-                  rows={1}
-                />
-                <button
-                  type="button"
-                  className="send-button"
-                  onPointerDown={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                  }}
-                  onClick={sendMessage}
-                  disabled={!messageInput.trim() || sending}
-                  style={{ opacity: sending ? 0.6 : 1 }}
-                >
-                  Send
-                </button>
+                    <EmojiFaceIcon />
+                  </button>
+                  {showEmojiPicker && (
+                    <div
+                      className="emoji-picker-panel"
+                      role="dialog"
+                      aria-label="Emoji picker"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      {QUICK_EMOJIS.map((emoji) => (
+                        <button
+                          key={`quick-emoji-${emoji}`}
+                          type="button"
+                          className="emoji-option-btn"
+                          onClick={() => addEmojiToInput(emoji)}
+                        >
+                          {emoji}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  <textarea
+                    ref={messageInputRef}
+                    className="message-input"
+                    placeholder="Type a message..."
+                    value={messageInput}
+                    onChange={(e) => handleMessageInputChange(e.target.value)}
+                    onFocus={() => {
+                      if (!isMobileView) return;
+                      inputFocusedRef.current = true;
+                      setChatViewportHeight();
+                      const viewport = window.visualViewport;
+                      const keyboardOffset = viewport
+                        ? Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop)
+                        : 0;
+                      applyKeyboardOffset(keyboardOffset);
+                      forceScrollToBottom();
+                      window.setTimeout(() => scrollToBottom(), 40);
+                      window.setTimeout(() => scrollToBottom(), 120);
+                    }}
+                    onBlur={() => {
+                      inputFocusedRef.current = false;
+                    }}
+                    onKeyDown={handleKeyPress}
+                    onPaste={handleInputPaste}
+                    rows={1}
+                  />
+                  <button
+                    type="button"
+                    className="send-button"
+                    onPointerDown={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                    }}
+                    onClick={sendMessage}
+                    disabled={!messageInput.trim() || sending}
+                    aria-label="Send message"
+                    style={{ opacity: sending ? 0.6 : 1 }}
+                  >
+                    <SendArrowIcon />
+                  </button>
+                </div>
               </div>
             </>
           ) : (
             <div className="no-chat-selected">
-              <p>Select a chat to start messaging</p>
+              {hasDeepLinkTarget && !selectedChatRoom && (redirectOpenLoading || redirectPendingSelection || loading) ? (
+                <div className="chat-inline-loader" role="status" aria-live="polite" aria-label="Opening chat">
+                  <span className="chat-inline-spinner" aria-hidden="true" />
+                  <p>Opening chat...</p>
+                </div>
+              ) : (
+                <p>Select a chat to start messaging</p>
+              )}
               {chatOpenError && <p>{chatOpenError}</p>}
             </div>
           )}
@@ -3043,6 +3358,11 @@ const ChatPage = () => {
           {actionSheetCanCopy && (
             <button className="context-item" onClick={copyMessageFromActionSheet}>
               Copy
+            </button>
+          )}
+          {actionSheetCanToggleSave && (
+            <button className="context-item" onClick={toggleSaveMessage}>
+              {actionSheetMessageIsSaved ? 'Unsave message' : 'Save message'}
             </button>
           )}
           <button className="context-item" onClick={deleteForMe}>

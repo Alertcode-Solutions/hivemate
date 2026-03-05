@@ -23,6 +23,27 @@ type OutputOption = {
   available: boolean;
 };
 
+const buildIceServers = (): RTCIceServer[] => {
+  const servers: RTCIceServer[] = [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' }
+  ];
+
+  const turnUrl = String(import.meta.env.VITE_TURN_URL || '').trim();
+  const turnUsername = String(import.meta.env.VITE_TURN_USERNAME || '').trim();
+  const turnCredential = String(import.meta.env.VITE_TURN_CREDENTIAL || '').trim();
+
+  if (turnUrl) {
+    servers.unshift({
+      urls: turnUrl,
+      username: turnUsername || undefined,
+      credential: turnCredential || undefined
+    });
+  }
+
+  return servers;
+};
+
 const SpeakerIcon = () => (
   <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
     <path d="M4 10h4l5-4v12l-5-4H4z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
@@ -87,6 +108,9 @@ const CallModal = ({
   const disconnectGraceTimerRef = useRef<number | null>(null);
   const unansweredTimeoutRef = useRef<number | null>(null);
   const hasConnectedOnceRef = useRef(false);
+  const ringtoneIntervalRef = useRef<number | null>(null);
+  const vibrationIntervalRef = useRef<number | null>(null);
+  const ringtoneAudioContextRef = useRef<AudioContext | null>(null);
   const [audioOutputSupported, setAudioOutputSupported] = useState(false);
 
   const normalizeUserId = (value: any): string => {
@@ -223,6 +247,81 @@ const CallModal = ({
     };
   }, [callStatus, isIncoming, callId, callerId, onEnd, onReject, socket]);
 
+  const playRingtonePulse = async () => {
+    const AudioContextClass = (window as any).AudioContext || (window as any).webkitAudioContext;
+    if (!AudioContextClass) return;
+
+    if (!ringtoneAudioContextRef.current) {
+      ringtoneAudioContextRef.current = new AudioContextClass();
+    }
+
+    const audioContext = ringtoneAudioContextRef.current;
+    if (!audioContext) return;
+
+    if (audioContext.state === 'suspended') {
+      try {
+        await audioContext.resume();
+      } catch {
+        return;
+      }
+    }
+
+    const now = audioContext.currentTime;
+    const makeBeep = (startOffset: number, frequency: number, duration = 0.18) => {
+      const oscillator = audioContext.createOscillator();
+      const gainNode = audioContext.createGain();
+      oscillator.type = 'sine';
+      oscillator.frequency.setValueAtTime(frequency, now + startOffset);
+      gainNode.gain.setValueAtTime(0.0001, now + startOffset);
+      gainNode.gain.exponentialRampToValueAtTime(0.08, now + startOffset + 0.02);
+      gainNode.gain.exponentialRampToValueAtTime(0.0001, now + startOffset + duration);
+      oscillator.connect(gainNode);
+      gainNode.connect(audioContext.destination);
+      oscillator.start(now + startOffset);
+      oscillator.stop(now + startOffset + duration + 0.01);
+    };
+
+    makeBeep(0, 760);
+    makeBeep(0.22, 620);
+  };
+
+  const stopRingtoneAndVibration = () => {
+    if (ringtoneIntervalRef.current !== null) {
+      window.clearInterval(ringtoneIntervalRef.current);
+      ringtoneIntervalRef.current = null;
+    }
+    if (vibrationIntervalRef.current !== null) {
+      window.clearInterval(vibrationIntervalRef.current);
+      vibrationIntervalRef.current = null;
+    }
+    if (navigator?.vibrate) {
+      navigator.vibrate(0);
+    }
+  };
+
+  useEffect(() => {
+    if (!isIncoming || callStatus !== 'ringing') {
+      stopRingtoneAndVibration();
+      return;
+    }
+
+    void playRingtonePulse();
+    ringtoneIntervalRef.current = window.setInterval(() => {
+      void playRingtonePulse();
+    }, 1700);
+
+    if (navigator?.vibrate) {
+      navigator.vibrate([320, 150, 320, 910]);
+      vibrationIntervalRef.current = window.setInterval(() => {
+        navigator.vibrate([320, 150, 320, 910]);
+      }, 1700);
+    }
+
+    return () => {
+      stopRingtoneAndVibration();
+    };
+  }, [isIncoming, callStatus]);
+
   const initializeCall = async (): Promise<boolean> => {
     try {
       if (peerConnectionRef.current && localStreamRef.current) return true;
@@ -283,7 +382,7 @@ const CallModal = ({
     if (!RTCPeerConnectionClass) throw new Error('WebRTC is not supported in this browser.');
 
     const peerConnection = new RTCPeerConnectionClass({
-      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }]
+      iceServers: buildIceServers()
     });
 
     peerConnection.onicecandidate = (event) => {
@@ -593,6 +692,7 @@ const CallModal = ({
 
   const cleanup = () => {
     hasConnectedOnceRef.current = false;
+    stopRingtoneAndVibration();
     if (unansweredTimeoutRef.current !== null) {
       window.clearTimeout(unansweredTimeoutRef.current);
       unansweredTimeoutRef.current = null;
@@ -620,6 +720,14 @@ const CallModal = ({
     if (peerConnectionRef.current) {
       peerConnectionRef.current.close();
       peerConnectionRef.current = null;
+    }
+    if (ringtoneAudioContextRef.current) {
+      try {
+        void ringtoneAudioContextRef.current.close();
+      } catch {
+        // no-op
+      }
+      ringtoneAudioContextRef.current = null;
     }
   };
 
