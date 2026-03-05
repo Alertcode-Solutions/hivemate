@@ -208,7 +208,7 @@ export const getChatHistory = async (req: Request, res: Response) => {
     }
 
     // Run post-read side effects in parallel to keep history API responsive.
-    await Promise.all([
+    const [, deletedNotificationsResult] = await Promise.all([
       Message.updateMany(
         {
           chatRoomId,
@@ -219,6 +219,20 @@ export const getChatHistory = async (req: Request, res: Response) => {
       ),
       Notification.deleteMany(messageNotificationQuery)
     ]);
+
+    // Keep in-app notification UI in sync: remove message notifications that were just consumed.
+    if (Number(deletedNotificationsResult?.deletedCount || 0) > 0) {
+      try {
+        const wsServer = getWebSocketServer();
+        wsServer.emitToUser(userId, 'notification:clear', {
+          type: 'message',
+          chatRoomId: String(chatRoomId),
+          senderIds: otherParticipantIds
+        });
+      } catch {
+        // WebSocket may be unavailable during some boot/error states.
+      }
+    }
 
     res.json({
       messages: messages.reverse().map((msg: any) => ({

@@ -4,6 +4,7 @@ import { Socket } from 'socket.io-client';
 import CallModal from './CallModal';
 import { getApiBaseUrl } from '../utils/runtimeConfig';
 import { acquireSharedSocket, releaseSharedSocket } from '../utils/socketManager';
+import { notifyNativeCallDismissed, notifyNativeIncomingCall } from '../utils/nativeCallBridge';
 
 type ActiveCall = {
   callId: string;
@@ -71,6 +72,12 @@ const GlobalCallHandler = () => {
         callerName: data.initiatorName || 'Unknown',
         callerId: normalizeId(data.initiatorId)
       });
+      void notifyNativeIncomingCall({
+        callId: incomingCallId,
+        type: data.type === 'video' ? 'video' : 'voice',
+        callerId: normalizeId(data.initiatorId),
+        callerName: data.initiatorName || 'Unknown'
+      });
       setAutoAcceptIncoming(false);
       setShowCallModal(true);
     };
@@ -116,6 +123,12 @@ const GlobalCallHandler = () => {
       callerId,
       callerName
     });
+    void notifyNativeIncomingCall({
+      callId,
+      type,
+      callerId,
+      callerName
+    });
     setAutoAcceptIncoming(autoAnswer);
     setShowCallModal(true);
 
@@ -130,6 +143,9 @@ const GlobalCallHandler = () => {
   }, [location.pathname, location.search, navigate]);
 
   const closeModal = () => {
+    if (activeCall?.callId) {
+      void notifyNativeCallDismissed(activeCall.callId);
+    }
     setShowCallModal(false);
     setActiveCall(null);
     setAutoAcceptIncoming(false);

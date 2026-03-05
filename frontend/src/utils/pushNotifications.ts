@@ -1,4 +1,5 @@
 import { getApiBaseUrl } from './runtimeConfig';
+import { isNativeApp } from './platform';
 
 const urlBase64ToUint8Array = (base64String: string) => {
   const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
@@ -24,6 +25,7 @@ const postSubscriptionToBackend = async (subscription: PushSubscription, token: 
 };
 
 export const syncExistingPushSubscription = async () => {
+  if (isNativeApp()) return;
   if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) {
     return;
   }
@@ -40,6 +42,7 @@ export const syncExistingPushSubscription = async () => {
 };
 
 export const ensureFriendRequestPushSubscription = async () => {
+  if (isNativeApp()) return;
   if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) {
     return;
   }

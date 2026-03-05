@@ -4,6 +4,7 @@ import App from './App';
 import './index.css';
 import { BrowserCompatibility, ensureTextEncoderDecoder } from './utils/browserCompatibility';
 import * as serviceWorkerRegistration from './utils/serviceWorkerRegistration';
+import { isNativeApp } from './utils/platform';
 
 // Initialize polyfills
 ensureTextEncoderDecoder();
@@ -18,7 +19,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
 );
 
 // Register service worker only in production to avoid stale-cache behavior in dev tunnels/mobile testing.
-if (import.meta.env.PROD) {
+if (import.meta.env.PROD && !isNativeApp()) {
   serviceWorkerRegistration.register();
 } else {
   serviceWorkerRegistration.unregister();

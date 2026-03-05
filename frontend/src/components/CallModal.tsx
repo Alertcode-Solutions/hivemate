@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { BrowserCompatibility } from '../utils/browserCompatibility';
+import { getWebRtcIceServers } from '../utils/runtimeConfig';
 import './CallModal.css';
 
 interface CallModalProps {
@@ -87,7 +88,12 @@ const CallModal = ({
   const disconnectGraceTimerRef = useRef<number | null>(null);
   const unansweredTimeoutRef = useRef<number | null>(null);
   const hasConnectedOnceRef = useRef(false);
+  const ringtoneAudioContextRef = useRef<AudioContext | null>(null);
+  const ringtoneGainNodeRef = useRef<GainNode | null>(null);
+  const ringtoneIntervalRef = useRef<number | null>(null);
+  const ringtoneVibrationIntervalRef = useRef<number | null>(null);
   const [audioOutputSupported, setAudioOutputSupported] = useState(false);
+  const iceServersRef = useRef<RTCIceServer[]>(getWebRtcIceServers());
 
   const normalizeUserId = (value: any): string => {
     if (!value) return '';
@@ -136,6 +142,18 @@ const CallModal = ({
     autoAcceptTriggeredRef.current = true;
     handleAcceptCall();
   }, [autoAccept, isIncoming, callStatus]);
+
+  useEffect(() => {
+    if (isIncoming && callStatus === 'ringing') {
+      startRingtone();
+    } else {
+      stopRingtone();
+    }
+
+    return () => {
+      stopRingtone();
+    };
+  }, [isIncoming, callStatus]);
 
   useEffect(() => {
     const videoEl = localVideoRef.current;
@@ -283,7 +301,7 @@ const CallModal = ({
     if (!RTCPeerConnectionClass) throw new Error('WebRTC is not supported in this browser.');
 
     const peerConnection = new RTCPeerConnectionClass({
-      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }]
+      iceServers: iceServersRef.current
     });
 
     peerConnection.onicecandidate = (event) => {
@@ -389,6 +407,105 @@ const CallModal = ({
       ]);
     } catch (err) {
       console.error('Failed to enumerate audio output devices:', err);
+    }
+  };
+
+  const emitRingtonePulse = () => {
+    const audioContext = ringtoneAudioContextRef.current;
+    const gainNode = ringtoneGainNodeRef.current;
+    if (!audioContext || !gainNode) return;
+
+    const now = audioContext.currentTime;
+    const firstTone = audioContext.createOscillator();
+    firstTone.type = 'sine';
+    firstTone.frequency.value = 880;
+    firstTone.connect(gainNode);
+
+    const secondTone = audioContext.createOscillator();
+    secondTone.type = 'sine';
+    secondTone.frequency.value = 740;
+    secondTone.connect(gainNode);
+
+    try {
+      gainNode.gain.cancelScheduledValues(now);
+      gainNode.gain.setValueAtTime(0.0001, now);
+      gainNode.gain.exponentialRampToValueAtTime(0.06, now + 0.03);
+      gainNode.gain.exponentialRampToValueAtTime(0.0001, now + 0.45);
+    } catch {
+      // Ignore scheduling edge cases if context timing resets.
+    }
+
+    firstTone.start(now);
+    firstTone.stop(now + 0.22);
+    secondTone.start(now + 0.24);
+    secondTone.stop(now + 0.45);
+  };
+
+  const startRingtone = () => {
+    if (ringtoneIntervalRef.current !== null) return;
+    try {
+      const AudioContextClass = (window as any).AudioContext || (window as any).webkitAudioContext;
+      if (!AudioContextClass) return;
+      const audioContext = new AudioContextClass();
+      const gainNode = audioContext.createGain();
+      gainNode.gain.value = 0.0001;
+      gainNode.connect(audioContext.destination);
+
+      ringtoneAudioContextRef.current = audioContext;
+      ringtoneGainNodeRef.current = gainNode;
+
+      if (audioContext.state === 'suspended') {
+        void audioContext.resume().catch(() => undefined);
+      }
+
+      emitRingtonePulse();
+      ringtoneIntervalRef.current = window.setInterval(() => {
+        emitRingtonePulse();
+      }, 1400);
+
+      if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
+        navigator.vibrate([180, 80, 180]);
+        ringtoneVibrationIntervalRef.current = window.setInterval(() => {
+          navigator.vibrate([180, 80, 180]);
+        }, 1600);
+      }
+    } catch (err) {
+      console.error('Failed to start ringtone:', err);
+    }
+  };
+
+  const stopRingtone = () => {
+    if (ringtoneIntervalRef.current !== null) {
+      window.clearInterval(ringtoneIntervalRef.current);
+      ringtoneIntervalRef.current = null;
+    }
+
+    if (ringtoneVibrationIntervalRef.current !== null) {
+      window.clearInterval(ringtoneVibrationIntervalRef.current);
+      ringtoneVibrationIntervalRef.current = null;
+    }
+
+    if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
+      navigator.vibrate(0);
+    }
+
+    if (ringtoneGainNodeRef.current) {
+      try {
+        const ctx = ringtoneAudioContextRef.current;
+        if (ctx) {
+          ringtoneGainNodeRef.current.gain.cancelScheduledValues(ctx.currentTime);
+          ringtoneGainNodeRef.current.gain.setValueAtTime(0.0001, ctx.currentTime);
+        }
+      } catch {
+        // Best-effort cleanup only.
+      }
+      ringtoneGainNodeRef.current.disconnect();
+      ringtoneGainNodeRef.current = null;
+    }
+
+    if (ringtoneAudioContextRef.current) {
+      void ringtoneAudioContextRef.current.close().catch(() => undefined);
+      ringtoneAudioContextRef.current = null;
     }
   };
 
@@ -564,6 +681,7 @@ const CallModal = ({
   };
 
   const handleRejectCall = () => {
+    stopRingtone();
     const initiatorId = normalizeUserId(callerId);
     socket.emit('call:reject', { callId, initiatorId, reason: 'declined' });
     onReject();
@@ -592,6 +710,7 @@ const CallModal = ({
   };
 
   const cleanup = () => {
+    stopRingtone();
     hasConnectedOnceRef.current = false;
     if (unansweredTimeoutRef.current !== null) {
       window.clearTimeout(unansweredTimeoutRef.current);

@@ -3,6 +3,7 @@ import { lazy, Suspense, useEffect, useState } from 'react';
 import { applyUpdate } from './utils/serviceWorkerRegistration';
 import { startRefreshScheduler, stopRefreshScheduler } from './utils/refreshScheduler';
 import { ensureFriendRequestPushSubscription } from './utils/pushNotifications';
+import { ensureNativePushRegistration } from './utils/nativePushRegistration';
 import ErrorBoundary from './components/ErrorBoundary';
 import { ToastProvider } from './components/Toast';
 import GlobalCallHandler from './components/GlobalCallHandler';
@@ -86,6 +87,9 @@ function App() {
   useEffect(() => {
     ensureFriendRequestPushSubscription().catch((error) => {
       console.error('Push subscription setup failed:', error);
+    });
+    ensureNativePushRegistration().catch((error) => {
+      console.error('Native push setup failed:', error);
     });
   }, []);
 

@@ -2,6 +2,7 @@ import { Server as SocketIOServer } from 'socket.io';
 import { Server as HTTPServer } from 'http';
 import { verifyToken } from '../utils/jwt';
 import CallSession from '../models/CallSession';
+import Notification from '../models/Notification';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -160,9 +161,19 @@ export class WebSocketServer {
             status: 'active',
             startedAt: new Date()
           });
+          await Notification.deleteMany({
+            userId,
+            type: 'call_request',
+            $or: [{ 'data.callId': String(callId) }, { 'data.callerId': String(initiatorId) }]
+          });
         } catch (error) {
           console.error('Failed to mark call active:', error);
         }
+        this.emitToUser(userId, 'notification:clear', {
+          type: 'call_request',
+          callId: String(callId),
+          callerId: String(initiatorId || '')
+        });
         this.emitToUser(initiatorId, 'call:accepted', {
           callId,
           acceptedBy: userId,
@@ -177,9 +188,19 @@ export class WebSocketServer {
             status: 'ended',
             endedAt: new Date()
           });
+          await Notification.deleteMany({
+            userId,
+            type: 'call_request',
+            $or: [{ 'data.callId': String(callId) }, { 'data.callerId': String(initiatorId) }]
+          });
         } catch (error) {
           console.error('Failed to mark call ended on reject:', error);
         }
+        this.emitToUser(userId, 'notification:clear', {
+          type: 'call_request',
+          callId: String(callId),
+          callerId: String(initiatorId || '')
+        });
         this.emitToUser(initiatorId, 'call:rejected', {
           callId,
           rejectedBy: userId,

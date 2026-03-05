@@ -81,6 +81,7 @@ const NotificationBell = () => {
   const socketHandlersRef = useRef<{
     connect?: () => void;
     notification?: (notification: any) => void;
+    notificationClear?: (payload: any) => void;
     disconnect?: () => void;
   }>({});
   const dropdownRef = useRef<HTMLDivElement>(null);
@@ -106,6 +107,9 @@ const NotificationBell = () => {
         }
         if (socketHandlersRef.current.notification) {
           socketRef.current.off('notification:new', socketHandlersRef.current.notification);
+        }
+        if (socketHandlersRef.current.notificationClear) {
+          socketRef.current.off('notification:clear', socketHandlersRef.current.notificationClear);
         }
         if (socketHandlersRef.current.disconnect) {
           socketRef.current.off('disconnect', socketHandlersRef.current.disconnect);
@@ -152,16 +156,54 @@ const NotificationBell = () => {
       });
     };
 
+    const handleNotificationClear = (payload: any) => {
+      const clearType = String(payload?.type || '');
+      const clearChatRoomId = normalizeId(payload?.chatRoomId);
+      const clearCallId = normalizeId(payload?.callId);
+      const clearCallerId = normalizeId(payload?.callerId);
+      const senderIdList = Array.isArray(payload?.senderIds)
+        ? payload.senderIds.map((value: any) => normalizeId(value)).filter(Boolean)
+        : [];
+
+      setNotifications((prev) => {
+        const next = prev.filter((item) => {
+          if (clearType === 'message' && item.type === 'message') {
+            const itemChatRoomId = normalizeId(item?.data?.chatRoomId);
+            const itemSenderId = normalizeId(
+              item?.data?.senderId ||
+              item?.data?.fromUserId ||
+              item?.data?.userId
+            );
+            if (clearChatRoomId && itemChatRoomId === clearChatRoomId) return false;
+            if (senderIdList.length > 0 && itemSenderId && senderIdList.includes(itemSenderId)) return false;
+          }
+
+          if (clearType === 'call_request' && item.type === 'call_request') {
+            const itemCallId = normalizeId(item?.data?.callId);
+            const itemCallerId = normalizeId(item?.data?.callerId);
+            if (clearCallId && itemCallId === clearCallId) return false;
+            if (clearCallerId && itemCallerId === clearCallerId) return false;
+          }
+
+          return true;
+        });
+        setUnreadCount(next.filter((n) => !n.read).length);
+        return next;
+      });
+    };
+
     const handleDisconnect = () => {
       console.log('WebSocket disconnected');
     };
 
     newSocket.on('connect', handleConnect);
     newSocket.on('notification:new', handleNotification);
+    newSocket.on('notification:clear', handleNotificationClear);
     newSocket.on('disconnect', handleDisconnect);
     socketHandlersRef.current = {
       connect: handleConnect,
       notification: handleNotification,
+      notificationClear: handleNotificationClear,
       disconnect: handleDisconnect
     };
 
@@ -304,7 +346,9 @@ const NotificationBell = () => {
   };
 
   const handleNotificationClick = async (notification: Notification) => {
-    if (!notification.read) {
+    if (notification.type === 'message' || notification.type === 'call_request') {
+      await deleteNotification(notification._id);
+    } else if (!notification.read) {
       await markAsRead(notification._id);
     }
 

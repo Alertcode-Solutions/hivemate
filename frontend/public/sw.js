@@ -1,5 +1,5 @@
 // Service Worker for HiveMate
-const CACHE_VERSION = 'v4';
+const CACHE_VERSION = 'v5';
 const STATIC_CACHE = `hivemate-static-${CACHE_VERSION}`;
 const DYNAMIC_CACHE = `hivemate-dynamic-${CACHE_VERSION}`;
 const DYNAMIC_CACHE_MAX_ENTRIES = 120;
@@ -312,7 +312,6 @@ self.addEventListener('notificationclick', (event) => {
                 chatRoomId
               });
               console.log('[SW] Posted SPA navigation message to focused client', { to: targetUrl, chatRoomId });
-              return;
             } catch (postError) {
               console.error('[SW] postMessage failed, falling back to navigate', postError);
             }
