@@ -63,7 +63,8 @@
 
 .search-button,
 .hamburger-menu,
-.profile-button {
+.profile-button,
+.install-app-button {
   width: 42px;
   height: 42px;
   border-radius: var(--radius-md);
@@ -104,11 +105,25 @@
 
 .search-button:hover,
 .hamburger-menu:hover,
-.profile-button:hover {
+.profile-button:hover,
+.install-app-button:hover {
   transform: translateY(-1px);
   border-color: rgba(199, 219, 255, 0.45);
   background: rgba(255, 255, 255, 0.14);
   box-shadow: 0 8px 16px rgba(5, 21, 46, 0.3);
+}
+
+.install-app-button {
+  min-width: 42px;
+  width: auto;
+  padding: 0 0.62rem;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
 }
 
 .hamburger-menu {
@@ -527,7 +542,8 @@
 
   .search-button,
   .hamburger-menu,
-  .profile-button {
+  .profile-button,
+  .install-app-button {
     width: 38px;
     height: 38px;
   }
@@ -538,12 +554,14 @@
   }
 
   .homepage-header .notification-bell-button,
-  .homepage-header .profile-button {
+  .homepage-header .profile-button,
+  .homepage-header .install-app-button {
     border: none;
     background: transparent;
     box-shadow: none;
     color: #e8f1ff;
     padding: 0;
+    min-width: 34px;
     width: 34px;
     height: 34px;
     display: inline-flex;
@@ -552,7 +570,8 @@
   }
 
   .homepage-header .notification-bell-button:hover,
-  .homepage-header .profile-button:hover {
+  .homepage-header .profile-button:hover,
+  .homepage-header .install-app-button:hover {
     background: transparent;
     border: none;
     box-shadow: none;
@@ -569,6 +588,15 @@
   .homepage-header .notification-bell-button .bell-icon svg {
     width: 24px;
     height: 24px;
+  }
+
+  .homepage-header .install-app-button {
+    width: auto;
+    min-width: 64px;
+    padding: 0 0.5rem;
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.01em;
   }
 
   .teammate-soon-panel {
@@ -718,6 +746,12 @@
 
   .mobile-menu-panel .logout-button {
     color: #ffb4b4;
+  }
+}
+
+@media (display-mode: standalone) {
+  .homepage-header .install-app-button {
+    display: none !important;
   }
 }
 

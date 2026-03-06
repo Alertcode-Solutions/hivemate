@@ -167,7 +167,6 @@ const HomePage = () => {
           </button>
 
           <NotificationBell />
-
           <button
             className="profile-button top-profile-button"
             onClick={() => goToProfile(navigate, localStorage.getItem('userId'))}

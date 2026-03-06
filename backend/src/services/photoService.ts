@@ -18,7 +18,7 @@ export class PhotoService {
     }
 
     // Check if it's a valid base64 image
-    const base64Regex = /^data:image\/(png|jpg|jpeg|gif|webp);base64,/;
+    const base64Regex = /^data:image\/(png|jpg|jpeg|gif|webp|heic|heif);base64,/;
     return base64Regex.test(photo);
   }
 

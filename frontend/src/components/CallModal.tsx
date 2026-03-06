@@ -44,6 +44,15 @@ const buildIceServers = (): RTCIceServer[] => {
   return servers;
 };
 
+const isCallDebugEnabled = () => {
+  if (import.meta.env.DEV) return true;
+  try {
+    return window.localStorage.getItem('debug-call') === '1';
+  } catch {
+    return false;
+  }
+};
+
 const SpeakerIcon = () => (
   <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
     <path d="M4 10h4l5-4v12l-5-4H4z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
@@ -112,6 +121,17 @@ const CallModal = ({
   const vibrationIntervalRef = useRef<number | null>(null);
   const ringtoneAudioContextRef = useRef<AudioContext | null>(null);
   const [audioOutputSupported, setAudioOutputSupported] = useState(false);
+  const callDebugRef = useRef<boolean>(isCallDebugEnabled());
+  const logCallDebug = (label: string, extra: Record<string, unknown> = {}) => {
+    if (!callDebugRef.current) return;
+    console.log('[CallDebug]', label, {
+      callId,
+      callType,
+      isIncoming,
+      callStatus,
+      ...extra
+    });
+  };
 
   const normalizeUserId = (value: any): string => {
     if (!value) return '';
@@ -130,6 +150,7 @@ const CallModal = ({
       socket.on('call:accepted', handleCallAccepted);
       socket.on('call:rejected', handleCallRejected);
       socket.on('call:ended', handleCallEnded);
+      logCallDebug('socket-listeners-attached');
     }
 
     if (!isIncoming && callStatus === 'connecting') {
@@ -145,6 +166,7 @@ const CallModal = ({
         socket.off('call:accepted', handleCallAccepted);
         socket.off('call:rejected', handleCallRejected);
         socket.off('call:ended', handleCallEnded);
+        logCallDebug('socket-listeners-detached');
       }
     };
   }, []);
@@ -233,6 +255,7 @@ const CallModal = ({
 
     if (!isIncoming && callStatus === 'connecting') {
       unansweredTimeoutRef.current = window.setTimeout(() => {
+        emitSocketCallEnd('no_answer');
         setCallStatus('ended');
         setError('No answer');
         setTimeout(() => onEnd(), 600);
@@ -414,6 +437,7 @@ const CallModal = ({
 
     peerConnection.onconnectionstatechange = () => {
       const state = peerConnection.connectionState;
+      logCallDebug('pc-connection-state', { state });
       if (state === 'connected') {
         hasConnectedOnceRef.current = true;
         if (disconnectGraceTimerRef.current !== null) {
@@ -443,6 +467,7 @@ const CallModal = ({
 
     peerConnection.oniceconnectionstatechange = () => {
       const iceState = peerConnection.iceConnectionState;
+      logCallDebug('pc-ice-state', { iceState });
       if (iceState === 'connected' || iceState === 'completed') {
         hasConnectedOnceRef.current = true;
         if (disconnectGraceTimerRef.current !== null) {
@@ -548,6 +573,7 @@ const CallModal = ({
 
   const handleOffer = async (data: any) => {
     if (String(data?.callId || '') !== String(callId)) return;
+    logCallDebug('received-offer', { fromUserId: data?.fromUserId });
     if (isIncoming && !hasAcceptedIncomingRef.current) {
       pendingOfferRef.current = data;
       return;
@@ -557,6 +583,7 @@ const CallModal = ({
 
   const handleAnswer = async (data: any) => {
     if (String(data?.callId || '') !== String(callId)) return;
+    logCallDebug('received-answer', { fromUserId: data?.fromUserId });
     try {
       if (!peerConnectionRef.current) return;
       await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(data.answer));
@@ -582,6 +609,7 @@ const CallModal = ({
 
   const handleIceCandidate = async (data: any) => {
     if (String(data?.callId || '') !== String(callId)) return;
+    logCallDebug('received-ice-candidate', { fromUserId: data?.fromUserId });
     try {
       if (!peerConnectionRef.current) {
         pendingIceCandidatesRef.current.push(data.candidate);
@@ -599,6 +627,7 @@ const CallModal = ({
 
   const handleCallAccepted = async (data?: any) => {
     if (String(data?.callId || '') !== String(callId)) return;
+    logCallDebug('call-accepted', { acceptedBy: data?.acceptedBy });
     setCallStatus('connecting');
     if (!isIncoming && peerConnectionRef.current?.localDescription?.type === 'offer') {
       try {
@@ -618,6 +647,7 @@ const CallModal = ({
 
   const handleCallRejected = (data?: any) => {
     if (String(data?.callId || '') !== String(callId)) return;
+    logCallDebug('call-rejected', { reason: data?.reason, rejectedBy: data?.rejectedBy });
     setCallStatus('ended');
     if (data?.reason === 'busy') {
       setError('User is busy on another call');
@@ -631,12 +661,25 @@ const CallModal = ({
 
   const handleCallEnded = (data?: any) => {
     if (data?.callId && String(data.callId) !== String(callId)) return;
+    logCallDebug('call-ended-event', { endedBy: data?.endedBy, reason: data?.reason });
+    if (!data?.callId) {
+      emitSocketCallEnd('connection_lost');
+    }
     setCallStatus('ended');
     cleanup();
     setTimeout(() => onEnd(), 800);
   };
 
+  const emitSocketCallEnd = (reason: string) => {
+    try {
+      socket.emit('call:end', { callId, reason });
+    } catch (err) {
+      console.error('Failed to emit call:end:', err);
+    }
+  };
+
   const handleAcceptCall = async () => {
+    logCallDebug('accept-call-clicked');
     hasAcceptedIncomingRef.current = true;
     setCallStatus('connecting');
 
@@ -654,6 +697,7 @@ const CallModal = ({
 
     onAccept();
     const initiatorId = normalizeUserId(callerId);
+    logCallDebug('emit-call-accept', { initiatorId });
     socket.emit('call:accept', { callId, initiatorId });
 
     if (pendingOfferRef.current) {
@@ -664,11 +708,14 @@ const CallModal = ({
 
   const handleRejectCall = () => {
     const initiatorId = normalizeUserId(callerId);
+    logCallDebug('emit-call-reject', { initiatorId });
     socket.emit('call:reject', { callId, initiatorId, reason: 'declined' });
     onReject();
   };
 
   const handleEndCall = () => {
+    logCallDebug('end-call-clicked');
+    emitSocketCallEnd('ended');
     onEnd();
   };
 

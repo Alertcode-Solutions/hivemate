@@ -31,6 +31,8 @@ export class EncryptionService {
   private static keyPair: KeyPair | null = null;
   private static publicKeyCache: Map<string, CryptoKey> = new Map();
   private static readonly BASE64_REGEX = /^[A-Za-z0-9+/=]+$/;
+  private static readonly PEM_PUBLIC_KEY_HEADER = '-----BEGIN PUBLIC KEY-----';
+  private static readonly PEM_PUBLIC_KEY_FOOTER = '-----END PUBLIC KEY-----';
 
   /**
    * Generate RSA key pair for the current user
@@ -111,7 +113,8 @@ export class EncryptionService {
    */
   static async importPublicKey(publicKeyString: string): Promise<CryptoKey> {
     try {
-      const binaryString = atob(publicKeyString);
+      const normalized = this.normalizeBase64Key(publicKeyString);
+      const binaryString = atob(normalized);
       const bytes = new Uint8Array(binaryString.length);
       for (let i = 0; i < binaryString.length; i++) {
         bytes[i] = binaryString.charCodeAt(i);
@@ -131,6 +134,14 @@ export class EncryptionService {
       console.error('Failed to import public key:', error);
       throw new Error('Public key import failed');
     }
+  }
+
+  static clearRecipientPublicKeyCache(recipientId?: string): void {
+    if (!recipientId) {
+      this.publicKeyCache.clear();
+      return;
+    }
+    this.publicKeyCache.delete(String(recipientId));
   }
 
   /**
@@ -204,7 +215,11 @@ export class EncryptionService {
       });
 
       if (!response.ok) {
-        throw new Error('Failed to fetch public key');
+        const error: any = new Error('Failed to fetch public key');
+        error.status = response.status;
+        const payload = await response.json().catch(() => null);
+        error.code = payload?.error?.code;
+        throw error;
       }
 
       const data = await response.json();
@@ -239,7 +254,11 @@ export class EncryptionService {
       });
 
       if (!response.ok) {
-        throw new Error('Failed to upload public key');
+        const error: any = new Error('Failed to upload public key');
+        error.status = response.status;
+        const payload = await response.json().catch(() => null);
+        error.code = payload?.error?.code;
+        throw error;
       }
     } catch (error) {
       console.error('Failed to upload public key:', error);
@@ -432,6 +451,25 @@ export class EncryptionService {
 
   private static base64ToUtf8(value: string): string {
     return new TextDecoder().decode(this.base64ToBytes(value));
+  }
+
+  private static normalizeBase64Key(value: string): string {
+    let normalized = String(value || '').trim();
+    if (
+      normalized.startsWith(this.PEM_PUBLIC_KEY_HEADER) &&
+      normalized.includes(this.PEM_PUBLIC_KEY_FOOTER)
+    ) {
+      normalized = normalized
+        .replace(this.PEM_PUBLIC_KEY_HEADER, '')
+        .replace(this.PEM_PUBLIC_KEY_FOOTER, '')
+        .trim();
+    }
+    normalized = normalized.replace(/\s+/g, '').replace(/-/g, '+').replace(/_/g, '/');
+    const remainder = normalized.length % 4;
+    if (remainder > 0) {
+      normalized = normalized.padEnd(normalized.length + (4 - remainder), '=');
+    }
+    return normalized;
   }
 
   private static toArrayBuffer(bytes: Uint8Array): ArrayBuffer {

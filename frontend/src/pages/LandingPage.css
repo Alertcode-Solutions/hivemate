@@ -151,6 +151,12 @@
 	border-color: rgba(194, 214, 250, 0.38);
 }
 
+.landing-install-btn {
+	color: #eff6ff;
+	background: rgba(17, 35, 66, 0.78);
+	border-color: rgba(170, 197, 245, 0.52);
+}
+
 .landing-cta-row .landing-btn-secondary {
 	color: #0f1f3a;
 	border-color: rgba(139, 162, 200, 0.8);

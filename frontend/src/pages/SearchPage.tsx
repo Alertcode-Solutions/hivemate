@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { getApiBaseUrl } from '../utils/runtimeConfig';
 import { goToProfile, resolveProfileTarget } from '../utils/profileRouting';
@@ -80,9 +80,74 @@ const SearchPage = () => {
   const [loading, setLoading] = useState(false);
   const [showFilters, setShowFilters] = useState(false);
   const [recentProfiles, setRecentProfiles] = useState<RecentProfile[]>([]);
-  const keyboardBaseScrollYRef = useRef(0);
-  const keyboardLiftAppliedRef = useRef(false);
-  const keyboardWasOpenRef = useRef(false);
+
+  useEffect(() => {
+    const html = document.documentElement;
+    const body = document.body;
+    const root = document.getElementById('root');
+
+    const captureStyles = (element: HTMLElement | null) => ({
+      position: element?.style.position ?? '',
+      top: element?.style.top ?? '',
+      left: element?.style.left ?? '',
+      right: element?.style.right ?? '',
+      width: element?.style.width ?? '',
+      height: element?.style.height ?? '',
+      overflow: element?.style.overflow ?? '',
+      overflowY: element?.style.overflowY ?? '',
+      touchAction: element?.style.touchAction ?? ''
+    });
+
+    const restoreStyles = (
+      element: HTMLElement | null,
+      snapshot: ReturnType<typeof captureStyles>
+    ) => {
+      if (!element) return;
+      element.style.position = snapshot.position;
+      element.style.top = snapshot.top;
+      element.style.left = snapshot.left;
+      element.style.right = snapshot.right;
+      element.style.width = snapshot.width;
+      element.style.height = snapshot.height;
+      element.style.overflow = snapshot.overflow;
+      element.style.overflowY = snapshot.overflowY;
+      element.style.touchAction = snapshot.touchAction;
+    };
+
+    const clearLockStyles = (element: HTMLElement | null) => {
+      if (!element) return;
+      element.style.position = 'static';
+      element.style.top = '';
+      element.style.left = '';
+      element.style.right = '';
+      element.style.width = '';
+      element.style.height = '';
+      element.style.overflow = 'auto';
+      element.style.overflowY = 'auto';
+      element.style.touchAction = 'auto';
+    };
+
+    const prevHtmlStyles = captureStyles(html);
+    const prevBodyStyles = captureStyles(body);
+    const prevRootStyles = captureStyles(root);
+
+    html.classList.remove('route-chat-lock');
+    body.classList.remove('route-chat-lock');
+
+    clearLockStyles(html);
+    clearLockStyles(body);
+    if (root) {
+      root.style.overflow = 'visible';
+      root.style.overflowY = 'visible';
+      root.style.touchAction = 'auto';
+    }
+
+    return () => {
+      restoreStyles(html, prevHtmlStyles);
+      restoreStyles(body, prevBodyStyles);
+      restoreStyles(root, prevRootStyles);
+    };
+  }, []);
 
   const commonSkills = [
     'JavaScript', 'TypeScript', 'Python', 'Java', 'React', 'Node.js', 'Angular', 'Vue.js',
@@ -295,71 +360,6 @@ const SearchPage = () => {
   };
 
   const getInitial = (name: string) => (name?.charAt(0).toUpperCase() || 'U');
-
-  useEffect(() => {
-    const isTypingField = (element: Element | null) => {
-      const target = element as HTMLElement | null;
-      if (!target) return false;
-      return (
-        target.tagName === 'INPUT' ||
-        target.tagName === 'TEXTAREA' ||
-        target.getAttribute('contenteditable') === 'true'
-      );
-    };
-
-    const getKeyboardOffset = () => {
-      const viewport = window.visualViewport;
-      if (!viewport) return 0;
-      return Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop);
-    };
-
-    const syncKeyboardScroll = () => {
-      const active = document.activeElement;
-      const hasTypingFocus = isTypingField(active);
-      const keyboardOffset = getKeyboardOffset();
-      const keyboardOpen = keyboardOffset > 120;
-      keyboardWasOpenRef.current = keyboardOpen;
-
-      if (keyboardOpen && hasTypingFocus && !keyboardLiftAppliedRef.current) {
-        keyboardLiftAppliedRef.current = true;
-        window.scrollTo({ top: keyboardBaseScrollYRef.current + 180, behavior: 'smooth' });
-      } else if (!keyboardOpen && keyboardLiftAppliedRef.current) {
-        keyboardLiftAppliedRef.current = false;
-        window.scrollTo(0, keyboardBaseScrollYRef.current);
-        window.setTimeout(() => window.scrollTo(0, keyboardBaseScrollYRef.current), 90);
-      }
-    };
-
-    const handleFocusIn = (event: FocusEvent) => {
-      if (!isTypingField(event.target as Element | null)) return;
-      keyboardBaseScrollYRef.current = window.scrollY;
-      keyboardLiftAppliedRef.current = false;
-      window.setTimeout(syncKeyboardScroll, 80);
-    };
-
-    const handleFocusOut = () => {
-      window.setTimeout(() => {
-        const keyboardOffset = getKeyboardOffset();
-        if (keyboardOffset <= 120 || !keyboardWasOpenRef.current) {
-          keyboardLiftAppliedRef.current = false;
-          window.scrollTo(0, keyboardBaseScrollYRef.current);
-        }
-      }, 120);
-    };
-
-    const viewport = window.visualViewport;
-    viewport?.addEventListener('resize', syncKeyboardScroll);
-    viewport?.addEventListener('scroll', syncKeyboardScroll);
-    document.addEventListener('focusin', handleFocusIn);
-    document.addEventListener('focusout', handleFocusOut);
-
-    return () => {
-      viewport?.removeEventListener('resize', syncKeyboardScroll);
-      viewport?.removeEventListener('scroll', syncKeyboardScroll);
-      document.removeEventListener('focusin', handleFocusIn);
-      document.removeEventListener('focusout', handleFocusOut);
-    };
-  }, []);
 
   const toggleFilters = () => {
     setShowFilters((prev) => !prev);

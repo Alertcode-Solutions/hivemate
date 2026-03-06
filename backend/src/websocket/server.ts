@@ -12,6 +12,8 @@ export class WebSocketServer {
   private io: SocketIOServer;
   private userSockets: Map<string, Set<string>> = new Map(); // userId -> socketIds
   private userLastSeen: Map<string, Date> = new Map();
+  private userDisconnectCleanupTimers: Map<string, NodeJS.Timeout> = new Map();
+  private static readonly CALL_DISCONNECT_GRACE_MS = 20000;
   private normalizeUserId(userId: any): string {
     if (!userId) return '';
     if (typeof userId === 'string') return userId;
@@ -56,6 +58,11 @@ export class WebSocketServer {
     this.io.on('connection', (socket) => {
       const userId = this.normalizeUserId((socket as any).userId);
       (socket as any).userId = userId;
+      const pendingDisconnectCleanupTimer = this.userDisconnectCleanupTimers.get(userId);
+      if (pendingDisconnectCleanupTimer) {
+        clearTimeout(pendingDisconnectCleanupTimer);
+        this.userDisconnectCleanupTimers.delete(userId);
+      }
       console.log(`✅ User connected: ${userId} (socket: ${socket.id})`);
 
       // Store user socket mapping
@@ -87,6 +94,12 @@ export class WebSocketServer {
               online: false,
               lastSeen
             });
+            const disconnectCleanupTimer = setTimeout(() => {
+              const stillOffline = (this.userSockets.get(userId)?.size || 0) === 0;
+              if (!stillOffline) return;
+              void this.endOngoingCallsForUser(userId, 'disconnect');
+            }, WebSocketServer.CALL_DISCONNECT_GRACE_MS);
+            this.userDisconnectCleanupTimers.set(userId, disconnectCleanupTimer);
           } else {
             this.userSockets.set(userId, userSocketSet);
           }
@@ -199,6 +212,37 @@ export class WebSocketServer {
         });
       });
 
+      socket.on('call:end', async (data) => {
+        const { callId } = data || {};
+        if (!callId) return;
+        try {
+          const callSession = await CallSession.findById(callId);
+          if (!callSession) return;
+          const isParticipant =
+            String(callSession.initiatorId) === userId ||
+            callSession.participantIds.some((participantId) => String(participantId) === userId);
+          if (!isParticipant || callSession.status === 'ended') return;
+
+          callSession.status = 'ended';
+          callSession.endedAt = new Date();
+          await callSession.save();
+
+          const otherParticipants = [
+            String(callSession.initiatorId),
+            ...callSession.participantIds.map((participantId) => String(participantId))
+          ].filter((participantId) => participantId !== userId);
+
+          this.emitToUsers(otherParticipants, 'call:ended', {
+            callId: callSession._id,
+            endedBy: userId,
+            reason: data?.reason || 'ended',
+            timestamp: new Date()
+          });
+        } catch (error) {
+          console.error('Failed to handle call:end:', error);
+        }
+      });
+
       // Typing indicator events
       socket.on('typing:start', (data) => {
         const { targetUserId, chatRoomId } = data || {};
@@ -220,6 +264,39 @@ export class WebSocketServer {
         });
       });
     });
+  }
+
+  private async endOngoingCallsForUser(userId: string, reason: string) {
+    const normalizedUserId = this.normalizeUserId(userId);
+    if (!normalizedUserId) return;
+    try {
+      const activeOrRingingCalls = await CallSession.find({
+        status: { $in: ['ringing', 'active'] },
+        $or: [{ initiatorId: normalizedUserId }, { participantIds: normalizedUserId }]
+      });
+
+      for (const callSession of activeOrRingingCalls) {
+        callSession.status = 'ended';
+        callSession.endedAt = new Date();
+        await callSession.save();
+
+        const otherParticipants = [
+          String(callSession.initiatorId),
+          ...callSession.participantIds.map((participantId) => String(participantId))
+        ].filter((participantId) => participantId !== normalizedUserId);
+
+        if (otherParticipants.length) {
+          this.emitToUsers(otherParticipants, 'call:ended', {
+            callId: callSession._id,
+            endedBy: normalizedUserId,
+            reason,
+            timestamp: new Date()
+          });
+        }
+      }
+    } catch (error) {
+      console.error('Failed to cleanup disconnected user calls:', error);
+    }
   }
 
   /**

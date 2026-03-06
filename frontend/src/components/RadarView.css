@@ -6,6 +6,88 @@
   overflow: visible;
 }
 
+.radar-location-prompt {
+  margin: 0 0 0.8rem;
+}
+
+.radar-location-prompt-card {
+  border: 1px solid rgba(245, 158, 11, 0.42);
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(255, 251, 235, 0.96), rgba(255, 247, 223, 0.94));
+  color: #7c2d12;
+  padding: 0.85rem 0.9rem;
+  box-shadow: 0 12px 20px rgba(146, 64, 14, 0.12);
+}
+
+.radar-location-prompt-card h4 {
+  margin: 0;
+  font-size: 0.98rem;
+  font-weight: 800;
+}
+
+.radar-location-prompt-card p {
+  margin: 0.4rem 0 0;
+  font-size: 0.88rem;
+  line-height: 1.35;
+}
+
+.radar-permission-settings-hint {
+  margin-top: 0.5rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.35rem 0.5rem;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.64);
+  border: 1px solid rgba(194, 120, 48, 0.24);
+  color: #7c2d12;
+  font-size: 0.84rem;
+  font-weight: 600;
+}
+
+.radar-permission-settings-icon {
+  width: 22px;
+  height: 22px;
+  border-radius: 7px;
+  background: #395889;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.radar-permission-settings-icon svg {
+  width: 15px;
+  height: 15px;
+  stroke: #edf4ff;
+  stroke-width: 2.8;
+  fill: none;
+  stroke-linecap: round;
+}
+
+.radar-location-prompt-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+  margin-top: 0.7rem;
+}
+
+.radar-location-prompt-actions button {
+  border: 1px solid rgba(194, 120, 48, 0.38);
+  border-radius: 10px;
+  background: #b45309;
+  color: #fff;
+  padding: 0.46rem 0.68rem;
+  font-size: 0.84rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.radar-location-prompt-actions button.secondary {
+  background: rgba(255, 255, 255, 0.72);
+  color: #7c2d12;
+}
+
 /* Unified Container - All sections in one white card */
 .radar-unified-container {
   background: linear-gradient(180deg, #fdfefe 0%, #f6f9ff 100%);

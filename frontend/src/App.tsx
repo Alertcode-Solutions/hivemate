@@ -3,6 +3,7 @@ import { lazy, Suspense, useEffect, useState } from 'react';
 import { applyUpdate } from './utils/serviceWorkerRegistration';
 import { startRefreshScheduler, stopRefreshScheduler } from './utils/refreshScheduler';
 import { ensureFriendRequestPushSubscription } from './utils/pushNotifications';
+import { applyAuthSessionPolicy } from './utils/authSessionPolicy';
 import ErrorBoundary from './components/ErrorBoundary';
 import { ToastProvider } from './components/Toast';
 import GlobalCallHandler from './components/GlobalCallHandler';
@@ -77,6 +78,10 @@ const RouteScrollController = () => {
 
 function App() {
   const [updateAvailable, setUpdateAvailable] = useState(false);
+
+  useEffect(() => {
+    applyAuthSessionPolicy();
+  }, []);
 
   useEffect(() => {
     startRefreshScheduler();

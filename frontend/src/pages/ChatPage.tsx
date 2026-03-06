@@ -304,6 +304,25 @@ const ChatPage = () => {
     }
     return String(value);
   };
+  const hasHandledSessionExpiryRef = useRef(false);
+  const isUnauthorizedFailure = (value: any): boolean => {
+    const status = Number(value?.status ?? value?.response?.status ?? 0);
+    const code = String(value?.code ?? value?.response?.data?.error?.code ?? '').toUpperCase();
+    return status === 401 || code === 'UNAUTHORIZED';
+  };
+  const handleSessionExpired = () => {
+    if (hasHandledSessionExpiryRef.current) return;
+    hasHandledSessionExpiryRef.current = true;
+    localStorage.removeItem('token');
+    localStorage.removeItem('userId');
+    sessionStorage.removeItem('token');
+    sessionStorage.removeItem('userId');
+    EncryptionService.clearKeys();
+    recipientKeyCacheRef.current = {};
+    wsRef.current?.disconnect();
+    releaseSharedSocket();
+    navigate('/login', { replace: true });
+  };
 
   const setChatViewportHeight = () => {
     if (!isMobileView) {
@@ -579,6 +598,10 @@ const ChatPage = () => {
       const response = await fetch(`${API_URL}/api/profiles/${normalizedTargetId}`, {
         headers: { Authorization: `Bearer ${token}` }
       });
+      if (response.status === 401) {
+        handleSessionExpired();
+        return '';
+      }
       if (!response.ok) return normalizedTargetId;
 
       const data = await response.json().catch(() => ({}));
@@ -1080,6 +1103,10 @@ const ChatPage = () => {
       console.log('Encryption initialized');
     } catch (error) {
       console.error('Failed to initialize encryption:', error);
+      if (isUnauthorizedFailure(error)) {
+        handleSessionExpired();
+        return;
+      }
       // Continue without encryption
       setEncryptionReady(true);
     }
@@ -1340,6 +1367,10 @@ const ChatPage = () => {
       const response = await fetch(`${API_URL}/api/messages/chats`, {
         headers: { Authorization: `Bearer ${token}` }
       });
+      if (response.status === 401) {
+        handleSessionExpired();
+        return;
+      }
 
       if (response.ok) {
         const data = await response.json();
@@ -1448,6 +1479,10 @@ const ChatPage = () => {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` }
       });
+      if (response.status === 401) {
+        handleSessionExpired();
+        return false;
+      }
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
@@ -1557,6 +1592,10 @@ const ChatPage = () => {
         headers: { Authorization: `Bearer ${token}` },
         signal: controller.signal
       });
+      if (response.status === 401) {
+        handleSessionExpired();
+        return;
+      }
 
       if (response.ok) {
         if (loadId !== activeMessagesLoadRef.current) return;
@@ -1639,17 +1678,33 @@ const ChatPage = () => {
     }
   };
 
-  const getRecipientPublicKeyCached = async (receiverId: string, token: string) => {
+  const getRecipientPublicKeyCached = async (
+    receiverId: string,
+    token: string,
+    options?: { forceRefresh?: boolean }
+  ) => {
     const cacheKey = normalizeId(receiverId);
-    const cached = recipientKeyCacheRef.current[cacheKey];
-    if (cached) return cached;
-    const publicKey = await EncryptionService.getRecipientPublicKey(
-      receiverId,
-      API_URL,
-      token
-    );
-    recipientKeyCacheRef.current[cacheKey] = publicKey;
-    return publicKey;
+    if (options?.forceRefresh) {
+      delete recipientKeyCacheRef.current[cacheKey];
+      EncryptionService.clearRecipientPublicKeyCache(cacheKey);
+    } else {
+      const cached = recipientKeyCacheRef.current[cacheKey];
+      if (cached) return cached;
+    }
+    try {
+      const publicKey = await EncryptionService.getRecipientPublicKey(
+        receiverId,
+        API_URL,
+        token
+      );
+      recipientKeyCacheRef.current[cacheKey] = publicKey;
+      return publicKey;
+    } catch (error) {
+      if (isUnauthorizedFailure(error)) {
+        handleSessionExpired();
+      }
+      throw error;
+    }
   };
 
   const sendMessage = async () => {
@@ -1664,6 +1719,10 @@ const ChatPage = () => {
     const roomId = String(selectedChatRoom.chatRoomId);
     try {
       const token = localStorage.getItem('token');
+      if (!token) {
+        handleSessionExpired();
+        return;
+      }
       const receiverId = selectedChatRoom.participants.find(
         p => String(p.userId) !== currentUserIdStr
       )?.userId;
@@ -1712,8 +1771,8 @@ const ChatPage = () => {
       // Encrypt for receiver and sender (sender must read own history later).
       let encryptedContent: string;
       let senderEncryptedContent: string;
+      const keyPair = await EncryptionService.getKeyPair();
       try {
-        const keyPair = await EncryptionService.getKeyPair();
         const recipientPublicKey = await getRecipientPublicKeyCached(
           receiverId,
           token!
@@ -1723,9 +1782,29 @@ const ChatPage = () => {
           EncryptionService.encryptMessage(sanitizedMessage, keyPair.publicKey)
         ]);
       } catch (error) {
-        console.error('Encryption failed:', error);
-        alert('Could not encrypt message. Please refresh and try again.');
-        return;
+        if (isUnauthorizedFailure(error)) {
+          handleSessionExpired();
+          return;
+        }
+        try {
+          const refreshedRecipientPublicKey = await getRecipientPublicKeyCached(
+            receiverId,
+            token!,
+            { forceRefresh: true }
+          );
+          [encryptedContent, senderEncryptedContent] = await Promise.all([
+            EncryptionService.encryptMessage(sanitizedMessage, refreshedRecipientPublicKey),
+            EncryptionService.encryptMessage(sanitizedMessage, keyPair.publicKey)
+          ]);
+        } catch (retryError) {
+          if (isUnauthorizedFailure(retryError)) {
+            handleSessionExpired();
+            return;
+          }
+          console.error('Encryption failed:', retryError || error);
+          alert('Could not encrypt message. Please refresh and try again.');
+          return;
+        }
       }
 
       const response = await fetch(`${API_URL}/api/messages`, {
@@ -1770,14 +1849,30 @@ const ChatPage = () => {
         });
         setActionSheet(null);
       } else {
+        if (response.status === 401) {
+          pendingOutgoingByRoomRef.current[roomId] = (pendingOutgoingByRoomRef.current[roomId] || []).filter(
+            (message) => normalizeId(message.id) !== tempMessageId
+          );
+          setMessages((prev) => prev.filter((message) => normalizeId(message.id) !== tempMessageId));
+          handleSessionExpired();
+          return;
+        }
         pendingOutgoingByRoomRef.current[roomId] = (pendingOutgoingByRoomRef.current[roomId] || []).filter(
           (message) => normalizeId(message.id) !== tempMessageId
         );
         setMessages((prev) => prev.filter((message) => normalizeId(message.id) !== tempMessageId));
-        const error = await response.json();
+        const error = await response.json().catch(() => ({}));
         alert(error.error?.message || 'Failed to send message');
       }
     } catch (error) {
+      if (isUnauthorizedFailure(error)) {
+        pendingOutgoingByRoomRef.current[roomId] = (pendingOutgoingByRoomRef.current[roomId] || []).filter(
+          (message) => normalizeId(message.id) !== tempMessageId
+        );
+        setMessages((prev) => prev.filter((message) => normalizeId(message.id) !== tempMessageId));
+        handleSessionExpired();
+        return;
+      }
       console.error('Failed to send message:', error);
       pendingOutgoingByRoomRef.current[roomId] = (pendingOutgoingByRoomRef.current[roomId] || []).filter(
         (message) => normalizeId(message.id) !== tempMessageId
@@ -2229,19 +2324,21 @@ const ChatPage = () => {
   };
 
   const handleEndCall = async () => {
-    if (currentCall) {
+    const callIdToEnd = currentCall?.callId || '';
+    setShowCallModal(false);
+    setCurrentCall(null);
+    if (!callIdToEnd) return;
+    void (async () => {
       try {
         const token = localStorage.getItem('token');
-        await fetch(`${API_URL}/api/calls/${currentCall.callId}/end`, {
+        await fetch(`${API_URL}/api/calls/${callIdToEnd}/end`, {
           method: 'PUT',
           headers: { Authorization: `Bearer ${token}` }
         });
       } catch (error) {
         console.error('Failed to end call:', error);
       }
-    }
-    setShowCallModal(false);
-    setCurrentCall(null);
+    })();
   };
 
   const filteredChatRooms = useMemo(() => {

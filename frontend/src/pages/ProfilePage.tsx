@@ -682,9 +682,9 @@ const ProfilePage = () => {
     if (!file) return;
     event.target.value = '';
 
-    const allowedTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
+    const allowedTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/heic', 'image/heif'];
     if (!allowedTypes.includes(file.type)) {
-      setPhotoError('Please upload a JPEG, PNG, WebP, or GIF image.');
+      setPhotoError('Please upload a JPEG, PNG, WebP, GIF, HEIC, or HEIF image.');
       return;
     }
 
@@ -708,9 +708,9 @@ const ProfilePage = () => {
     if (!file || !isOwnProfile) return;
     event.target.value = '';
 
-    const allowedTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
+    const allowedTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/heic', 'image/heif'];
     if (!allowedTypes.includes(file.type)) {
-      setCoverError('Please upload a JPEG, PNG, WebP, or GIF image.');
+      setCoverError('Please upload a JPEG, PNG, WebP, GIF, HEIC, or HEIF image.');
       return;
     }
 
@@ -2060,14 +2060,14 @@ const ProfilePage = () => {
       <input
         ref={photoInputRef}
         type="file"
-        accept="image/jpeg,image/png,image/webp,image/gif"
+        accept="image/jpeg,image/png,image/webp,image/gif,image/heic,image/heif,.heic,.heif"
         onChange={handleProfilePhotoFile}
         className="hidden-photo-input"
       />
       <input
         ref={coverInputRef}
         type="file"
-        accept="image/jpeg,image/png,image/webp,image/gif"
+        accept="image/jpeg,image/png,image/webp,image/gif,image/heic,image/heif,.heic,.heif"
         onChange={handleCoverPhotoFile}
         className="hidden-photo-input"
       />

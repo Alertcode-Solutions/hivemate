@@ -267,9 +267,9 @@ const CreateProfilePage = () => {
     if (!file) return;
     setSelectedPhotoName(file.name);
 
-    const allowedTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
+    const allowedTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/heic', 'image/heif'];
     if (!allowedTypes.includes(file.type)) {
-      setError('Please upload a JPEG, PNG, WebP, or GIF image');
+      setError('Please upload a JPEG, PNG, WebP, GIF, HEIC, or HEIF image');
       return;
     }
 
@@ -673,7 +673,7 @@ const CreateProfilePage = () => {
                   type="file"
                   id="photoUpload"
                   className="file-input-hidden"
-                  accept="image/jpeg,image/png,image/webp,image/gif"
+                  accept="image/jpeg,image/png,image/webp,image/gif,image/heic,image/heif,.heic,.heif"
                   onChange={handlePhotoFileSelect}
                 />
                 <label htmlFor="photoUpload" className="file-upload-trigger">

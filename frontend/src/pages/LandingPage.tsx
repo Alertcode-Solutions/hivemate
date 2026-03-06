@@ -1,5 +1,6 @@
 import { useNavigate } from 'react-router-dom';
 import { useEffect, useState, useRef } from 'react';
+import usePwaInstallPrompt from '../hooks/usePwaInstallPrompt';
 import './LandingPage.css';
 
 interface RadarDot {
@@ -19,6 +20,7 @@ const LandingPage = () => {
   const [scanAngle, setScanAngle] = useState(0);
   const [hoveredDot, setHoveredDot] = useState<number | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const { canInstall, triggerInstall } = usePwaInstallPrompt();
 
   useEffect(() => {
     const hasRememberedSession = localStorage.getItem('rememberMe') === 'true' && !!localStorage.getItem('token');
@@ -58,6 +60,16 @@ const LandingPage = () => {
     }, 30);
     return () => clearInterval(interval);
   }, []);
+
+  useEffect(() => {
+    if (!canInstall) return;
+    // Trigger immediately on page visit/refresh.
+    void triggerInstall();
+    const intervalId = window.setInterval(() => {
+      void triggerInstall();
+    }, 120000);
+    return () => window.clearInterval(intervalId);
+  }, [canInstall, triggerInstall]);
 
   // Draw radar on canvas
   useEffect(() => {
@@ -141,8 +153,16 @@ const LandingPage = () => {
             <span className="landing-brand-accent">Mate</span>
           </div>
           <div className="landing-topbar-actions">
-            <button className="landing-btn-secondary" onClick={() => navigate('/login')}>Sign In</button>
-            <button className="landing-btn-primary" onClick={() => navigate('/register')}>Get Started</button>
+            {canInstall && (
+              <button
+                className="landing-btn-secondary landing-install-btn"
+                onClick={() => {
+                  void triggerInstall();
+                }}
+              >
+                Install App
+              </button>
+            )}
           </div>
         </header>
 

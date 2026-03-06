@@ -251,19 +251,21 @@ const GlobalCallHandler = () => {
   };
 
   const handleEndCall = async () => {
-    if (activeCall?.callId) {
+    const callIdToEnd = activeCall?.callId || '';
+    closeModal();
+    if (!callIdToEnd) return;
+    void (async () => {
       try {
         const token = localStorage.getItem('token');
         const API_URL = getApiBaseUrl();
-        await fetch(`${API_URL}/api/calls/${activeCall.callId}/end`, {
+        await fetch(`${API_URL}/api/calls/${callIdToEnd}/end`, {
           method: 'PUT',
           headers: { Authorization: `Bearer ${token}` }
         });
       } catch (error) {
         console.error('Failed to end call from global handler:', error);
       }
-    }
-    closeModal();
+    })();
   };
 
   if (!showCallModal || !activeCall) return null;

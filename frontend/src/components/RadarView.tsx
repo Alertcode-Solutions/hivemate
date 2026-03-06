@@ -38,6 +38,14 @@ interface SelectedRadarUser {
   photo?: string;
 }
 
+type LocationPromptKind = 'permission' | 'services' | 'unsupported' | 'blocked';
+
+interface LocationPromptState {
+  kind: LocationPromptKind;
+  title: string;
+  message: string;
+}
+
 type RadarLoadPhase = 'starting' | 'searching' | 'ready';
 
 const RADAR_SCAN_CYCLE_MS = 700;
@@ -69,15 +77,32 @@ const getCurrentPositionAsync = (options: PositionOptions): Promise<{ lat: numbe
     );
   });
 
+const queryGeolocationPermissionState = async (): Promise<PermissionState | 'unsupported'> => {
+  if (!navigator.permissions?.query) return 'unsupported';
+  try {
+    const status = await navigator.permissions.query({ name: 'geolocation' as PermissionName });
+    return status.state;
+  } catch {
+    return 'unsupported';
+  }
+};
+
+const getBlockedPermissionPrompt = (): LocationPromptState => ({
+  kind: 'blocked',
+  title: 'Location Permission Blocked',
+  message:
+    'Location permission is blocked for this site. Enable it from browser site settings, then try Explore Mode again.'
+});
+
 const RadarView = () => {
   const navigate = useNavigate();
   const getStoredVisibilityMode = (): 'explore' | 'vanish' => {
     const savedMode = localStorage.getItem('radarVisibilityMode');
-    return savedMode === 'explore' || savedMode === 'vanish' ? savedMode : 'explore';
+    return savedMode === 'explore' || savedMode === 'vanish' ? savedMode : 'vanish';
   };
 
   const [visibilityMode, setVisibilityMode] = useState<'explore' | 'vanish'>(() => {
-    // Load saved mode from localStorage, default to 'explore'
+    // Keep last user-selected mode; only manual toggle should change this.
     return getStoredVisibilityMode();
   });
   const [nearbyUsers, setNearbyUsers] = useState<RadarDot[]>([]);
@@ -91,6 +116,8 @@ const RadarView = () => {
   const [hasFetchedNearbyOnce, setHasFetchedNearbyOnce] = useState(false);
   const [radarLoadPhase, setRadarLoadPhase] = useState<RadarLoadPhase>('starting');
   const [, setLocationIssue] = useState<string>('');
+  const [locationPrompt, setLocationPrompt] = useState<LocationPromptState | null>(null);
+  const [isExploreActivationPending, setIsExploreActivationPending] = useState(false);
   const [showFilters, setShowFilters] = useState(false);
   const [hoverLabel, setHoverLabel] = useState<HoverLabel | null>(null);
   const [filters, setFilters] = useState<RadarFilters>({
@@ -250,6 +277,39 @@ const RadarView = () => {
     }
   };
 
+  const toLocationPrompt = (error: any): LocationPromptState => {
+    if (!navigator.geolocation) {
+      return {
+        kind: 'unsupported',
+        title: 'Location Not Supported',
+        message: 'Your browser does not support location access. Please use a modern browser to use Explore Mode.'
+      };
+    }
+
+    const code = Number(error?.code || 0);
+    if (code === 1) {
+      return {
+        kind: 'permission',
+        title: 'Allow Location Permission',
+        message:
+          'Explore Mode needs your location permission. Allow location access in the browser prompt or site settings.'
+      };
+    }
+    if (code === 2 || code === 3) {
+      return {
+        kind: 'services',
+        title: 'Turn On Device Location',
+        message:
+          'Location services seem off. Turn on GPS/location services on your device and try again.'
+      };
+    }
+    return {
+      kind: 'services',
+      title: 'Location Required',
+      message: 'Explore Mode needs your current location. Please enable location and try again.'
+    };
+  };
+
   useEffect(() => {
     localStorage.setItem('radarVisibilityMode', visibilityMode);
   }, [visibilityMode]);
@@ -260,6 +320,43 @@ const RadarView = () => {
 
   useEffect(() => {
     visibilityModeRef.current = visibilityMode;
+  }, [visibilityMode]);
+
+  useEffect(() => {
+    if (visibilityMode !== 'explore') return;
+    if (!navigator.geolocation) {
+      setLocationPrompt(toLocationPrompt({ code: 0 }));
+      return;
+    }
+    if (!navigator.permissions?.query) return;
+
+    let cancelled = false;
+    let permissionStatus: PermissionStatus | null = null;
+    const syncPermissionPrompt = () => {
+      if (!permissionStatus || cancelled) return;
+      if (permissionStatus.state === 'denied') {
+        setLocationPrompt(toLocationPrompt({ code: 1 }));
+      } else if (permissionStatus.state === 'granted') {
+        setLocationPrompt((prev) => (prev?.kind === 'permission' ? null : prev));
+      }
+    };
+
+    void navigator.permissions
+      .query({ name: 'geolocation' as PermissionName })
+      .then((status) => {
+        if (cancelled) return;
+        permissionStatus = status;
+        syncPermissionPrompt();
+        permissionStatus.onchange = syncPermissionPrompt;
+      })
+      .catch(() => undefined);
+
+    return () => {
+      cancelled = true;
+      if (permissionStatus) {
+        permissionStatus.onchange = null;
+      }
+    };
   }, [visibilityMode]);
 
   useEffect(() => {
@@ -443,9 +540,9 @@ const RadarView = () => {
           }
         );
 
-        if (data.mode === 'explore' || data.mode === 'vanish') {
-          setVisibilityMode(data.mode);
-        }
+        // Visibility mode is controlled by local startup checks and user toggles.
+        // Keep this request for auth validation/cache warm-up only.
+        void data;
       } catch (error: any) {
         if (error?.status === 401) {
           handleUnauthorized();
@@ -740,13 +837,16 @@ const RadarView = () => {
     }
   };
 
-  const requestLocationAccess = async (): Promise<{ lat: number; lng: number }> => {
+  const requestLocationAccess = async (
+    options: { forceFresh?: boolean } = {}
+  ): Promise<{ lat: number; lng: number }> => {
     const now = Date.now();
-    if (userLocationRef.current && now - lastLocationAtRef.current < 45000) {
+    if (!options.forceFresh && userLocationRef.current && now - lastLocationAtRef.current < 45000) {
       return userLocationRef.current;
     }
     if (locationRequestInFlightRef.current) {
-      if (userLocationRef.current) return userLocationRef.current;
+      if (!options.forceFresh && userLocationRef.current) return userLocationRef.current;
+      // Allow a forceFresh user-initiated call to proceed so browser permission UI can appear.
     }
 
     locationRequestInFlightRef.current = true;
@@ -757,96 +857,176 @@ const RadarView = () => {
       userLocationRef.current = freshLocation;
       lastLocationAtRef.current = Date.now();
       setLocationIssue('');
+      setLocationPrompt(null);
       return freshLocation;
+    } catch (error) {
+      setLocationIssue('Location permission is required for Explore Mode.');
+      setLocationPrompt(toLocationPrompt(error));
+      throw error;
     } finally {
       locationRequestInFlightRef.current = false;
     }
   };
 
+  const requestLocationForExploreFlow = async (): Promise<{ lat: number; lng: number }> => {
+    // Always attempt direct geolocation first from the user action path.
+    // This gives the browser the best chance to show the native permission popup.
+    try {
+      return await requestLocationAccess({ forceFresh: true });
+    } catch (error: any) {
+      const code = Number(error?.code || 0);
+      if (code === 1) {
+        const permissionState = await queryGeolocationPermissionState();
+        if (permissionState === 'denied') {
+          setLocationPrompt(getBlockedPermissionPrompt());
+          throw error;
+        }
+      }
+      setLocationPrompt(toLocationPrompt(error));
+      throw error;
+    }
+  };
+
+  const setServerVisibilityMode = async (mode: 'explore' | 'vanish') => {
+    const token = localStorage.getItem('token');
+    if (!token) {
+      handleUnauthorized();
+      throw new Error('Unauthorized');
+    }
+
+    const response = await fetch(`${API_URL}/api/location/visibility/mode`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`
+      },
+      body: JSON.stringify({ mode })
+    });
+
+    if (!response.ok) {
+      const data = await response.json().catch(() => null);
+      throw new Error(data?.error?.message || 'Failed to update visibility mode');
+    }
+
+    invalidateApiCacheByUrl('/api/location/visibility/mode');
+    invalidateApiCacheByUrl('/api/location/nearby');
+    if (socketRef.current) {
+      socketRef.current.emit('visibility:toggle', { mode });
+    }
+  };
+
+  const activateExploreMode = async (freshLocation: { lat: number; lng: number }) => {
+    hasExploreBootstrappedRef.current = true;
+    await setServerVisibilityMode('explore');
+    setVisibilityMode('explore');
+    await updateLocationOnServer(freshLocation, 'explore');
+    lastServerSyncAtRef.current = Date.now();
+    await fetchNearbyUsers(freshLocation);
+  };
+
+  const activateVanishMode = async (options: { keepLocationPrompt?: boolean } = {}) => {
+    const { keepLocationPrompt = false } = options;
+    setVisibilityMode('vanish');
+    if (!keepLocationPrompt) {
+      setLocationPrompt(null);
+    }
+    setNearbyUsers([]);
+    setHoverLabel(null);
+    setFocusedUserId(null);
+    try {
+      await setServerVisibilityMode('vanish');
+    } catch (error) {
+      logRadarError('activateVanishMode', error);
+      setVisibilityMode('explore');
+    }
+  };
+
+  useEffect(() => {
+    if (visibilityMode !== 'explore' || !navigator.geolocation) return;
+
+    let cancelled = false;
+    const watchId = navigator.geolocation.watchPosition(
+      (position) => {
+        if (cancelled || visibilityModeRef.current !== 'explore') return;
+        const liveLocation = {
+          lat: position.coords.latitude,
+          lng: position.coords.longitude
+        };
+        setUserLocation(liveLocation);
+        userLocationRef.current = liveLocation;
+        lastLocationAtRef.current = Date.now();
+        setLocationPrompt(null);
+      },
+      async (error) => {
+        if (cancelled || visibilityModeRef.current !== 'explore') return;
+        const code = Number((error as GeolocationPositionError)?.code || 0);
+        if (code === 1) {
+          const permissionState = await queryGeolocationPermissionState();
+          if (permissionState === 'denied') {
+            setLocationPrompt(getBlockedPermissionPrompt());
+          } else {
+            setLocationPrompt(toLocationPrompt(error));
+          }
+        } else {
+          setLocationPrompt(toLocationPrompt(error));
+        }
+        setLocationIssue('Location permission is required for Explore Mode.');
+        setNearbyUsers([]);
+      },
+      {
+        enableHighAccuracy: false,
+        maximumAge: 10000,
+        timeout: 10000
+      }
+    );
+
+    return () => {
+      cancelled = true;
+      navigator.geolocation.clearWatch(watchId);
+    };
+  }, [visibilityMode]);
+
   const toggleVisibilityMode = async () => {
-    const previousMode = visibilityMode;
+    if (isExploreActivationPending) return;
     const newMode = visibilityMode === 'explore' ? 'vanish' : 'explore';
 
     if (newMode === 'vanish') {
-      setVisibilityMode('vanish');
-      setNearbyUsers([]);
-      setHoverLabel(null);
-      setFocusedUserId(null);
       try {
-        const token = localStorage.getItem('token');
-        if (!token) {
-          handleUnauthorized();
-          return;
-        }
-        const response = await fetch(`${API_URL}/api/location/visibility/mode`, {
-          method: 'PUT',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${token}`
-          },
-          body: JSON.stringify({ mode: 'vanish' })
-        });
-
-        if (!response.ok) {
-          const data = await response.json().catch(() => null);
-          throw new Error(data?.error?.message || 'Failed to update visibility mode');
-        }
-
-        invalidateApiCacheByUrl('/api/location/visibility/mode');
-        invalidateApiCacheByUrl('/api/location/nearby');
-        if (socketRef.current) {
-          socketRef.current.emit('visibility:toggle', { mode: 'vanish' });
-        }
+        await activateVanishMode();
       } catch (error) {
         logRadarError('toggleVisibilityMode:vanish', error);
-        setVisibilityMode(previousMode);
       }
       return;
     }
 
     try {
-      const freshLocation = userLocationRef.current
-        ? { ...userLocationRef.current }
-        : await requestLocationAccess();
-
-      setVisibilityMode('explore');
-
-      const token = localStorage.getItem('token');
-      if (!token) {
-        handleUnauthorized();
-        return;
-      }
-      const response = await fetch(`${API_URL}/api/location/visibility/mode`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`
-        },
-        body: JSON.stringify({ mode: 'explore' })
-      });
-
-      if (!response.ok) {
-        const data = await response.json().catch(() => null);
-        throw new Error(data?.error?.message || 'Failed to update visibility mode');
-      }
-
-      invalidateApiCacheByUrl('/api/location/visibility/mode');
-      invalidateApiCacheByUrl('/api/location/nearby');
-      // Emit visibility change via WebSocket
-      if (socketRef.current) {
-        socketRef.current.emit('visibility:toggle', { mode: 'explore' });
-      }
-
-      await updateLocationOnServer(freshLocation, 'explore');
-      lastServerSyncAtRef.current = Date.now();
-      await fetchNearbyUsers(freshLocation);
+      setIsExploreActivationPending(true);
+      const freshLocation = await requestLocationForExploreFlow();
+      await activateExploreMode(freshLocation);
     } catch (error) {
       logRadarError('toggleVisibilityMode:explore', error);
-      setVisibilityMode(previousMode);
+      // Keep user in vanish until both permission and live location are available.
+      setVisibilityMode('vanish');
       setLocationIssue('Location permission is required for Explore Mode.');
-      if (previousMode === 'vanish') {
-        setNearbyUsers([]);
+      setNearbyUsers([]);
+    } finally {
+      setIsExploreActivationPending(false);
+    }
+  };
+
+  const handleLocationPromptAction = async () => {
+    try {
+      const freshLocation = await requestLocationForExploreFlow();
+      if (visibilityMode === 'explore') {
+        await updateLocationOnServer(freshLocation, 'explore');
+        lastServerSyncAtRef.current = Date.now();
+        await fetchNearbyUsers(freshLocation);
+      } else {
+        await activateExploreMode(freshLocation);
       }
+      setLocationPrompt(null);
+    } catch (error) {
+      logRadarError('handleLocationPromptAction', error);
     }
   };
 
@@ -1232,18 +1412,64 @@ const RadarView = () => {
 
   return (
     <div className="radar-view">
+      {locationPrompt && (
+        <div className="radar-location-prompt" role="alertdialog" aria-live="assertive">
+          <div className="radar-location-prompt-card">
+            <h4>{locationPrompt.title}</h4>
+            <p>{locationPrompt.message}</p>
+            {locationPrompt.kind === 'blocked' && (
+              <div className="radar-permission-settings-hint">
+                <span className="radar-permission-settings-icon" aria-hidden="true">
+                  <svg viewBox="0 0 48 48" focusable="false">
+                    <path d="M16 12h18" />
+                    <circle cx="26" cy="12" r="4" />
+                    <path d="M14 24h20" />
+                    <circle cx="19" cy="24" r="4" />
+                    <path d="M17 36h17" />
+                    <circle cx="29" cy="36" r="4" />
+                  </svg>
+                </span>
+                <span>Site settings -&gt; Permissions -&gt; Location -&gt; Allow</span>
+              </div>
+            )}
+            <div className="radar-location-prompt-actions">
+              {locationPrompt.kind !== 'unsupported' && (
+                <button type="button" onClick={() => void handleLocationPromptAction()}>
+                  {locationPrompt.kind === 'blocked'
+                    ? 'Retry After Allow'
+                    : visibilityMode === 'explore'
+                      ? 'Turn On Location'
+                      : 'Retry Explore'}
+                </button>
+              )}
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => void toggleVisibilityMode()}
+              >
+                {visibilityMode === 'explore' ? 'Switch to Vanish' : 'Stay in Vanish'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <div className="radar-unified-container">
         {/* Controls Section */}
         <div className="radar-controls">
           <div className="visibility-toggle">
             <label className="toggle-label">
-              <span className={visibilityMode === 'explore' ? 'active' : ''}>
-                {visibilityMode === 'explore' ? 'Explore Mode' : 'Vanish Mode'}
+              <span className={visibilityMode === 'explore' || isExploreActivationPending ? 'active' : ''}>
+                {isExploreActivationPending
+                  ? 'Checking Location...'
+                  : visibilityMode === 'explore'
+                    ? 'Explore Mode'
+                    : 'Vanish Mode'}
               </span>
               <input
                 type="checkbox"
-                checked={visibilityMode === 'explore'}
+                checked={visibilityMode === 'explore' || isExploreActivationPending}
                 onChange={toggleVisibilityMode}
+                disabled={isExploreActivationPending}
               />
               <span className="toggle-slider"></span>
             </label>
