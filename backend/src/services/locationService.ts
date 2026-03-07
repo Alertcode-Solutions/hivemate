@@ -3,6 +3,32 @@ import redis from '../config/redis';
 import { CacheService } from './cacheService';
 
 const LOCATION_UPDATE_COOLDOWN = 10; // seconds
+const MAX_NEARBY_RESULTS = 1000;
+const LARGE_RADIUS_THRESHOLD_METERS = 100000; // 100km
+
+const getNearbyCachePrecision = (radiusInMeters: number): number => {
+  if (radiusInMeters >= 1000000) return 2; // ~1.1km buckets for 1000km radar prefetch
+  if (radiusInMeters >= LARGE_RADIUS_THRESHOLD_METERS) return 3; // ~110m buckets
+  return 4; // ~11m buckets for close range
+};
+
+const buildNearbyCacheKey = (
+  latitude: number,
+  longitude: number,
+  minRadiusInMeters: number,
+  radiusInMeters: number,
+  excludeUserId?: string
+): string => {
+  const precision = getNearbyCachePrecision(radiusInMeters);
+  return [
+    'nearby',
+    latitude.toFixed(precision),
+    longitude.toFixed(precision),
+    minRadiusInMeters,
+    radiusInMeters,
+    excludeUserId || 'all'
+  ].join(':');
+};
 
 export class LocationService {
   /**
@@ -13,7 +39,12 @@ export class LocationService {
     latitude: number,
     longitude: number,
     accuracy: number,
-    mode: 'explore' | 'vanish'
+    mode: 'explore' | 'vanish',
+    profileSnapshot?: {
+      name?: string;
+      gender?: string;
+      photo?: string;
+    }
   ): Promise<void> {
     // Check rate limiting
     const cooldownKey = `location:cooldown:${userId}`;
@@ -42,13 +73,20 @@ export class LocationService {
         },
         mode,
         timestamp: new Date(),
-        accuracy
+        accuracy,
+        ...(profileSnapshot
+          ? {
+              profileName: profileSnapshot.name || '',
+              profileGender: profileSnapshot.gender || '',
+              profilePhoto: profileSnapshot.photo || ''
+            }
+          : {})
       },
       { upsert: true, new: true }
     );
 
-    // Nearby cache has a short TTL; invalidate asynchronously to avoid blocking updates.
-    void CacheService.deletePattern('nearby:*');
+    // Do not purge all nearby caches on each update. Short TTL + realtime refresh keeps
+    // radar fresh while preserving cache hit rate for large-radius queries.
 
     // Set cooldown
     await redis.setex(cooldownKey, LOCATION_UPDATE_COOLDOWN, '1');
@@ -71,8 +109,7 @@ export class LocationService {
       { new: true }
     );
 
-    // Nearby cache has a short TTL; invalidate asynchronously to avoid blocking mode toggles.
-    void CacheService.deletePattern('nearby:*');
+    // Do not purge all nearby caches on mode toggles for the same reason as above.
   }
 
   /**
@@ -90,10 +127,17 @@ export class LocationService {
     latitude: number,
     longitude: number,
     radiusInMeters: number,
-    excludeUserId?: string
+    excludeUserId?: string,
+    minRadiusInMeters = 0
   ): Promise<any[]> {
     // Try to get from cache first
-    const cacheKey = `nearby:${latitude.toFixed(4)}:${longitude.toFixed(4)}:${radiusInMeters}:${excludeUserId || 'all'}`;
+    const cacheKey = buildNearbyCacheKey(
+      latitude,
+      longitude,
+      minRadiusInMeters,
+      radiusInMeters,
+      excludeUserId
+    );
     const cached = await CacheService.get(cacheKey);
     if (cached) {
       return cached as any[];
@@ -107,10 +151,15 @@ export class LocationService {
             type: 'Point',
             coordinates: [longitude, latitude]
           },
+          ...(minRadiusInMeters > 0 ? { $minDistance: minRadiusInMeters } : {}),
           $maxDistance: radiusInMeters
         }
       },
-      mode: 'explore' // Only show users in explore mode
+      // Always use the last stored location, even if user is offline/location-off.
+      // Visibility is controlled strictly by mode:
+      // - explore: visible on radar
+      // - vanish: hidden from radar (location can still be stored)
+      mode: 'explore'
     };
 
     if (excludeUserId) {
@@ -118,9 +167,9 @@ export class LocationService {
     }
 
     const results = await Location.find(query)
-      .select('userId coordinates mode timestamp')
+      .select('userId coordinates mode timestamp profileName profileGender profilePhoto')
       .lean() // Use lean() for better performance
-      .limit(100); // Limit results to prevent excessive data
+      .limit(MAX_NEARBY_RESULTS); // Keep large enough for 1000km prefetch while still bounded.
 
     // Cache the results
     await CacheService.set(cacheKey, results, 30); // 30 seconds TTL

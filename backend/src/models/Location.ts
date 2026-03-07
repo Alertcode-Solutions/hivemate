@@ -9,6 +9,9 @@ export interface ILocation extends Document {
   mode: 'explore' | 'vanish';
   timestamp: Date;
   accuracy: number;
+  profileName?: string;
+  profileGender?: string;
+  profilePhoto?: string;
 }
 
 const LocationSchema: Schema = new Schema({
@@ -46,6 +49,18 @@ const LocationSchema: Schema = new Schema({
     type: Number,
     required: true,
     default: 0
+  },
+  profileName: {
+    type: String,
+    default: ''
+  },
+  profileGender: {
+    type: String,
+    default: ''
+  },
+  profilePhoto: {
+    type: String,
+    default: ''
   }
 });
 

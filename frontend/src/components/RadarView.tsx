@@ -51,6 +51,16 @@ type RadarLoadPhase = 'starting' | 'searching' | 'ready';
 const RADAR_SCAN_CYCLE_MS = 700;
 const SCROLL_LOG_THROTTLE_MS = 180;
 const RADAR_RESPONSE_CACHE_TTL_MS = 2500;
+const RADAR_PREFETCH_RADIUS_KM = 1000;
+const RADAR_DISTANCE_RINGS_KM = [
+  { min: 0, max: 50 },
+  { min: 50, max: 300 },
+  { min: 300, max: 700 },
+  { min: 700, max: 1000 }
+];
+const RADAR_LAST_LOCATION_KEY = 'radar:last-known-location';
+const RADAR_LAST_LOCATION_MAX_AGE_MS = 5 * 60 * 1000;
+const RADAR_RECENT_LOCATION_GRACE_MS = 2 * 60 * 1000;
 
 const isScrollDebugEnabled = () => {
   if (typeof window === 'undefined') return false;
@@ -94,6 +104,45 @@ const getBlockedPermissionPrompt = (): LocationPromptState => ({
     'Location permission is blocked for this site. Enable it from browser site settings, then try Explore Mode again.'
 });
 
+const readLastKnownLocation = (): { lat: number; lng: number } | null => {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem(RADAR_LAST_LOCATION_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    const lat = Number(parsed?.lat);
+    const lng = Number(parsed?.lng);
+    const at = Number(parsed?.at);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng) || !Number.isFinite(at)) {
+      return null;
+    }
+    if (Date.now() - at > RADAR_LAST_LOCATION_MAX_AGE_MS) {
+      return null;
+    }
+    return { lat, lng };
+  } catch {
+    return null;
+  }
+};
+
+const persistLastKnownLocation = (location: { lat: number; lng: number }) => {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(
+      RADAR_LAST_LOCATION_KEY,
+      JSON.stringify({ lat: location.lat, lng: location.lng, at: Date.now() })
+    );
+  } catch {
+    // Ignore storage errors.
+  }
+};
+
+const getRadarCachePrecision = (radiusInMeters: number): number => {
+  if (radiusInMeters >= 1000000) return 2;
+  if (radiusInMeters >= 100000) return 3;
+  return 4;
+};
+
 const RadarView = () => {
   const navigate = useNavigate();
   const getStoredVisibilityMode = (): 'explore' | 'vanish' => {
@@ -108,7 +157,7 @@ const RadarView = () => {
   const [nearbyUsers, setNearbyUsers] = useState<RadarDot[]>([]);
   const [filteredUsers, setFilteredUsers] = useState<RadarDot[]>([]);
   const [distanceRange, setDistanceRange] = useState(50); // km
-  const [userLocation, setUserLocation] = useState<{ lat: number; lng: number } | null>(null);
+  const [userLocation, setUserLocation] = useState<{ lat: number; lng: number } | null>(() => readLastKnownLocation());
   const [selectedUser, setSelectedUser] = useState<SelectedRadarUser | null>(null);
   const [focusedUserId, setFocusedUserId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -144,11 +193,17 @@ const RadarView = () => {
   const distanceRangeRef = useRef(distanceRange);
   const nearbyCountRef = useRef(nearbyUsers.length);
   const filteredCountRef = useRef(filteredUsers.length);
-  const nearbyFetchAbortRef = useRef<AbortController | null>(null);
+  const nearbyUsersRef = useRef<RadarDot[]>(nearbyUsers);
+  const nearbyFetchAbortByRadiusRef = useRef<Map<string, AbortController>>(new Map());
   const nearbyResponseCacheRef = useRef<Map<string, { at: number; users: RadarDot[] }>>(new Map());
   const nearbyFetchRequestIdRef = useRef(0);
   const distanceFetchDebounceRef = useRef<number | null>(null);
   const socketRefreshDebounceRef = useRef<number | null>(null);
+  const backgroundRingRefreshInFlightRef = useRef(false);
+  const fullRadiusRefreshInFlightRef = useRef(false);
+  const locationServicesErrorCountRef = useRef(0);
+  const shouldUseRingBootstrapRef = useRef(getStoredVisibilityMode() === 'explore');
+  const hasUsedRingBootstrapRef = useRef(false);
 
   const API_URL = getApiBaseUrl();
   const handleUnauthorized = () => {
@@ -338,7 +393,8 @@ const RadarView = () => {
       if (permissionStatus.state === 'denied') {
         setLocationPrompt(toLocationPrompt({ code: 1 }));
       } else if (permissionStatus.state === 'granted') {
-        setLocationPrompt((prev) => (prev?.kind === 'permission' ? null : prev));
+        // Clear stale prompts once permission is granted and location can flow again.
+        setLocationPrompt(null);
       }
     };
 
@@ -366,8 +422,9 @@ const RadarView = () => {
 
   useEffect(() => {
     nearbyCountRef.current = nearbyUsers.length;
+    nearbyUsersRef.current = nearbyUsers;
     filteredCountRef.current = filteredUsers.length;
-  }, [nearbyUsers.length, filteredUsers.length]);
+  }, [nearbyUsers, filteredUsers.length]);
 
   useEffect(() => {
     if (typeof window === 'undefined' || !scrollDebugEnabledRef.current) {
@@ -567,17 +624,28 @@ const RadarView = () => {
         }
         socketRefreshDebounceRef.current = window.setTimeout(() => {
           socketRefreshDebounceRef.current = null;
-          void fetchNearbyUsers(userLocationRef.current, { silent: true, forceRefresh: true });
-        }, 180);
+          void refreshNearbyUsersFullRadiusAtomic(userLocationRef.current, { forceRefresh: true });
+        }, 120);
       };
 
-      const handleRadarUpdate = () => {
+      const handleRadarUpdate = (data?: any) => {
+        const changedUserId = String(data?.userId || '');
+        const changedMode = data?.mode === 'vanish' ? 'vanish' : data?.mode === 'explore' ? 'explore' : '';
+        if (changedUserId && changedMode === 'vanish') {
+          setNearbyUsers((prev) => prev.filter((user) => user.userId !== changedUserId));
+        }
         triggerRealtimeRefresh();
       };
       const handleNearbyNotification = () => {
         triggerRealtimeRefresh();
       };
-      const handleVisibilityChanged = () => {
+      const handleVisibilityChanged = (data?: any) => {
+        const changedUserId = String(data?.userId || '');
+        const changedMode = data?.mode === 'vanish' ? 'vanish' : data?.mode === 'explore' ? 'explore' : '';
+        if (changedUserId && changedMode === 'vanish') {
+          // Remove vanished users immediately from the current radar view.
+          setNearbyUsers((prev) => prev.filter((user) => user.userId !== changedUserId));
+        }
         triggerRealtimeRefresh();
       };
       sharedSocket.on('radar:update', handleRadarUpdate);
@@ -608,10 +676,14 @@ const RadarView = () => {
         if (!currentLocation) return;
         const now = Date.now();
         if (now - lastServerSyncAtRef.current > 20000) {
-          await updateLocationOnServer(currentLocation, 'explore');
+          await Promise.all([
+            updateLocationOnServer(currentLocation, 'explore'),
+            refreshNearbyUsersFullRadiusAtomic(currentLocation, { forceRefresh: true })
+          ]);
           lastServerSyncAtRef.current = now;
+          return;
         }
-        await fetchNearbyUsers(currentLocation, { silent: true });
+        await refreshNearbyUsersFullRadiusAtomic(currentLocation, { forceRefresh: false });
       } finally {
         syncInFlightRef.current = false;
       }
@@ -642,7 +714,56 @@ const RadarView = () => {
         distanceFetchDebounceRef.current = null;
       }
     };
-  }, [visibilityMode, distanceRange]);
+  }, [visibilityMode]);
+
+  useEffect(() => {
+    if (visibilityMode !== 'vanish') return;
+    if (!userLocationRef.current) return;
+
+    const currentLocation = userLocationRef.current;
+    if (!currentLocation) return;
+    // Warm nearby cache immediately while vanished; periodic refresh is handled by the shared 30s loop.
+    void refreshNearbyUsersFullRadiusAtomic(currentLocation, {
+      forceRefresh: false,
+      applyData: false
+    });
+    return () => undefined;
+  }, [visibilityMode, userLocation]);
+
+  useEffect(() => {
+    if (!userLocationRef.current) return;
+    if (visibilityMode !== 'explore' && visibilityMode !== 'vanish') return;
+
+    let cancelled = false;
+    const runBackgroundRefresh = async () => {
+      if (cancelled || backgroundRingRefreshInFlightRef.current) return;
+      const currentLocation = userLocationRef.current;
+      if (!currentLocation) return;
+      backgroundRingRefreshInFlightRef.current = true;
+      try {
+        const effectiveLocation = await requestLocationAccess().catch(() => currentLocation);
+        await Promise.all([
+          updateLocationOnServer(effectiveLocation, visibilityModeRef.current),
+          refreshNearbyUsersFullRadiusAtomic(effectiveLocation, {
+            forceRefresh: true,
+            applyData: visibilityModeRef.current === 'explore'
+          })
+        ]);
+      } finally {
+        backgroundRingRefreshInFlightRef.current = false;
+      }
+    };
+
+    const intervalId = window.setInterval(() => {
+      void runBackgroundRefresh();
+    }, 30000);
+    void runBackgroundRefresh();
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [visibilityMode, userLocation]);
 
   useEffect(() => {
     if (visibilityMode !== 'explore') {
@@ -662,16 +783,20 @@ const RadarView = () => {
           ? { ...userLocationRef.current }
           : await requestLocationAccess();
         if (cancelled) return;
+        const shouldUseRingBootstrap =
+          shouldUseRingBootstrapRef.current && !hasUsedRingBootstrapRef.current;
+        hasUsedRingBootstrapRef.current = true;
         await Promise.all([
           updateLocationOnServer(freshLocation, 'explore'),
-          fetchNearbyUsers(freshLocation)
+          shouldUseRingBootstrap
+            ? fetchNearbyUsersStaged(freshLocation)
+            : refreshNearbyUsersFullRadiusAtomic(freshLocation, { forceRefresh: true })
         ]);
         lastServerSyncAtRef.current = Date.now();
       } catch (error) {
         if (cancelled) return;
         logRadarError('startExploreMode', error, { cancelled });
         setLocationIssue('Location permission is required for Explore Mode.');
-        setNearbyUsers([]);
       }
     };
 
@@ -730,7 +855,8 @@ const RadarView = () => {
 
   useEffect(() => {
     return () => {
-      nearbyFetchAbortRef.current?.abort();
+      nearbyFetchAbortByRadiusRef.current.forEach((controller) => controller.abort());
+      nearbyFetchAbortByRadiusRef.current.clear();
       if (distanceFetchDebounceRef.current !== null) {
         window.clearTimeout(distanceFetchDebounceRef.current);
         distanceFetchDebounceRef.current = null;
@@ -742,47 +868,88 @@ const RadarView = () => {
     };
   }, []);
 
+  const mergeNearbyUsers = (existing: RadarDot[], incoming: RadarDot[]): RadarDot[] => {
+    const mergedByUserId = new Map<string, RadarDot>();
+    existing.forEach((user) => {
+      mergedByUserId.set(user.userId, user);
+    });
+    incoming.forEach((user) => {
+      mergedByUserId.set(user.userId, user);
+    });
+    return Array.from(mergedByUserId.values());
+  };
+
+  const applyNearbyUsersSnapshot = (users: RadarDot[]) => {
+    setNearbyUsers(users);
+    nearbyUsersRef.current = users;
+    setHasFetchedNearbyOnce(true);
+    setRadarLoadPhase('ready');
+    setIsNearbyRefreshing(false);
+  };
+
   const fetchNearbyUsers = async (
     location = userLocation,
-    options: { silent?: boolean; forceRefresh?: boolean } = {}
+    options: {
+      silent?: boolean;
+      forceRefresh?: boolean;
+      radiusKm?: number;
+      minRadiusKm?: number;
+      merge?: boolean;
+      applyData?: boolean;
+      throwOnError?: boolean;
+    } = {}
   ) => {
-    if (!location) return;
-    const radiusInMeters = distanceRangeRef.current * 1000; // Convert km to meters
-    const cacheKey = `${location.lat.toFixed(4)}:${location.lng.toFixed(4)}:${radiusInMeters}`;
+    if (!location) return [] as RadarDot[];
+    const radiusInMeters = (options.radiusKm ?? RADAR_PREFETCH_RADIUS_KM) * 1000;
+    const minRadiusInMeters = Math.max(0, (options.minRadiusKm ?? 0) * 1000);
+    const requestCacheTtlMs = radiusInMeters >= 1000000 ? 12000 : 3000;
+    const precision = getRadarCachePrecision(radiusInMeters);
+    const cacheKey = `${location.lat.toFixed(precision)}:${location.lng.toFixed(precision)}:${minRadiusInMeters}:${radiusInMeters}`;
+    const shouldApplyData = options.applyData !== false;
     const cached = nearbyResponseCacheRef.current.get(cacheKey);
     const now = Date.now();
     if (!options.forceRefresh && cached && now - cached.at < RADAR_RESPONSE_CACHE_TTL_MS) {
-      setNearbyUsers(cached.users);
-      setHasFetchedNearbyOnce(true);
-      setRadarLoadPhase('ready');
-      setIsNearbyRefreshing(false);
-      return;
+      if (shouldApplyData) {
+        if (options.merge) {
+          setNearbyUsers((prev) => mergeNearbyUsers(prev, cached.users));
+        } else {
+          setNearbyUsers(cached.users);
+        }
+        setHasFetchedNearbyOnce(true);
+        setRadarLoadPhase('ready');
+        setIsNearbyRefreshing(false);
+      }
+      return cached.users;
     }
 
-    const requestId = ++nearbyFetchRequestIdRef.current;
-    setRadarLoadPhase('searching');
-    setIsNearbyRefreshing(true);
+    const requestId = shouldApplyData ? ++nearbyFetchRequestIdRef.current : nearbyFetchRequestIdRef.current;
+    if (shouldApplyData) {
+      setRadarLoadPhase('searching');
+      setIsNearbyRefreshing(true);
+    }
+    let controller: AbortController | undefined;
 
-    if (!options.silent) {
+    if (shouldApplyData && !options.silent) {
       setLoading(true);
     }
     try {
       const token = localStorage.getItem('token');
       if (!token) {
         handleUnauthorized();
-        return;
+        return [] as RadarDot[];
       }
-      nearbyFetchAbortRef.current?.abort();
-      const controller = new AbortController();
-      nearbyFetchAbortRef.current = controller;
+      const requestKey = `${minRadiusInMeters}:${radiusInMeters}`;
+      nearbyFetchAbortByRadiusRef.current.get(requestKey)?.abort();
+      controller = new AbortController();
+      nearbyFetchAbortByRadiusRef.current.set(requestKey, controller);
       const data = await fetchJsonCached<any>(
-        `${API_URL}/api/location/nearby?lat=${location.lat}&lng=${location.lng}&radius=${radiusInMeters}`,
+        `${API_URL}/api/location/nearby?lat=${location.lat}&lng=${location.lng}&radius=${radiusInMeters}&minRadius=${minRadiusInMeters}`,
         {
           headers: { Authorization: `Bearer ${token}` },
           signal: controller.signal
         },
         {
-          ttlMs: 3000,
+          ttlMs: requestCacheTtlMs,
           forceRefresh: Boolean(options.forceRefresh)
         }
       );
@@ -794,33 +961,120 @@ const RadarView = () => {
         longitude: user.coordinates?.longitude || 0,
         distance: user.distance || 0,
         gender: user.gender,
-        name: user.name,
-        photo: user.photo || ''
+          name: user.name,
+          photo: user.photo || ''
       }));
-      nearbyResponseCacheRef.current.set(cacheKey, { at: now, users: mappedUsers });
-      setNearbyUsers(mappedUsers);
-      setHasFetchedNearbyOnce(true);
+      nearbyResponseCacheRef.current.set(cacheKey, { at: Date.now(), users: mappedUsers });
+      if (shouldApplyData) {
+        if (options.merge) {
+          setNearbyUsers((prev) => mergeNearbyUsers(prev, mappedUsers));
+        } else {
+          setNearbyUsers(mappedUsers);
+        }
+        setHasFetchedNearbyOnce(true);
+      }
+      return mappedUsers;
     } catch (error: any) {
       if (error instanceof DOMException && error.name === 'AbortError') {
-        return;
+        if (options.throwOnError) throw error;
+        return [] as RadarDot[];
       }
       if (error?.status === 401) {
         handleUnauthorized();
-        return;
+        if (options.throwOnError) throw error;
+        return [] as RadarDot[];
       }
       logRadarError('fetchNearbyUsers', error, {
         lat: location?.lat,
         lng: location?.lng,
-        silent: Boolean(options.silent)
+        silent: Boolean(options.silent),
+        minRadiusInMeters,
+        radiusInMeters
       });
+      if (options.throwOnError) throw error;
+      return [] as RadarDot[];
     } finally {
-      if (!options.silent && requestId === nearbyFetchRequestIdRef.current) {
+      const key = `${minRadiusInMeters}:${radiusInMeters}`;
+      const activeController = nearbyFetchAbortByRadiusRef.current.get(key);
+      if (controller && activeController?.signal === controller.signal) {
+        nearbyFetchAbortByRadiusRef.current.delete(key);
+      }
+      if (shouldApplyData && !options.silent && requestId === nearbyFetchRequestIdRef.current) {
         setLoading(false);
       }
-      if (requestId === nearbyFetchRequestIdRef.current) {
+      if (shouldApplyData && requestId === nearbyFetchRequestIdRef.current) {
         setIsNearbyRefreshing(false);
         setRadarLoadPhase('ready');
       }
+    }
+  };
+
+  const fetchNearbyUsersStaged = async (
+    location = userLocation,
+    options: { silent?: boolean; forceRefresh?: boolean } = {}
+  ) => {
+    if (!location) return;
+    setRadarLoadPhase('searching');
+    setIsNearbyRefreshing(true);
+    try {
+      let mergedUsers: RadarDot[] = [];
+      for (let index = 0; index < RADAR_DISTANCE_RINGS_KM.length; index += 1) {
+        const ring = RADAR_DISTANCE_RINGS_KM[index];
+        const ringUsers = await fetchNearbyUsers(location, {
+          silent: index === 0 ? options.silent : true,
+          forceRefresh: options.forceRefresh,
+          minRadiusKm: ring.min,
+          radiusKm: ring.max,
+          applyData: false,
+          throwOnError: true
+        });
+        mergedUsers = mergeNearbyUsers(mergedUsers, ringUsers);
+      }
+      applyNearbyUsersSnapshot(mergedUsers);
+    } catch (error) {
+      logRadarError('fetchNearbyUsersStaged', error, {
+        lat: location?.lat,
+        lng: location?.lng
+      });
+      setIsNearbyRefreshing(false);
+      setRadarLoadPhase('ready');
+    }
+  };
+
+  const refreshNearbyUsersFullRadiusAtomic = async (
+    location = userLocation,
+    options: { forceRefresh?: boolean; applyData?: boolean } = {}
+  ) => {
+    if (!location) return;
+    if (fullRadiusRefreshInFlightRef.current) return;
+    fullRadiusRefreshInFlightRef.current = true;
+    if (options.applyData !== false) {
+      setRadarLoadPhase((prev) => (prev === 'starting' ? 'starting' : 'searching'));
+      setIsNearbyRefreshing(true);
+    }
+    try {
+      const users = await fetchNearbyUsers(location, {
+        silent: true,
+        forceRefresh: options.forceRefresh,
+        minRadiusKm: 0,
+        radiusKm: RADAR_PREFETCH_RADIUS_KM,
+        applyData: false,
+        throwOnError: true
+      });
+      if (options.applyData !== false) {
+        applyNearbyUsersSnapshot(users);
+      }
+    } catch (error) {
+      logRadarError('refreshNearbyUsersFullRadiusAtomic', error, {
+        lat: location?.lat,
+        lng: location?.lng
+      });
+      if (options.applyData !== false) {
+        setIsNearbyRefreshing(false);
+        setRadarLoadPhase('ready');
+      }
+    } finally {
+      fullRadiusRefreshInFlightRef.current = false;
     }
   };
 
@@ -889,10 +1143,36 @@ const RadarView = () => {
       setUserLocation(freshLocation);
       userLocationRef.current = freshLocation;
       lastLocationAtRef.current = Date.now();
+      persistLastKnownLocation(freshLocation);
       setLocationIssue('');
       setLocationPrompt(null);
+      locationServicesErrorCountRef.current = 0;
       return freshLocation;
     } catch (error) {
+      const code = Number((error as GeolocationPositionError)?.code || 0);
+      const hasRecentValidLocation =
+        Boolean(userLocationRef.current) &&
+        Date.now() - lastLocationAtRef.current < RADAR_RECENT_LOCATION_GRACE_MS;
+      if ((code === 2 || code === 3) && hasRecentValidLocation && userLocationRef.current) {
+        // Avoid false "turn on location" prompts when location is already available.
+        setLocationPrompt(null);
+        locationServicesErrorCountRef.current = 0;
+        return userLocationRef.current;
+      }
+      if (code === 2 || code === 3) {
+        locationServicesErrorCountRef.current += 1;
+        const permissionState = await queryGeolocationPermissionState();
+        const shouldShowServicesPrompt =
+          locationServicesErrorCountRef.current >= 2 &&
+          (permissionState !== 'granted' || !userLocationRef.current);
+        if (!shouldShowServicesPrompt) {
+          if (userLocationRef.current) {
+            setLocationPrompt(null);
+            return userLocationRef.current;
+          }
+          throw error;
+        }
+      }
       setLocationIssue('Location permission is required for Explore Mode.');
       setLocationPrompt(toLocationPrompt(error));
       throw error;
@@ -915,8 +1195,30 @@ const RadarView = () => {
           throw error;
         }
       }
+      if (code === 2 || code === 3) {
+        const hasRecentValidLocation =
+          Boolean(userLocationRef.current) &&
+          Date.now() - lastLocationAtRef.current < RADAR_RECENT_LOCATION_GRACE_MS;
+        const permissionState = await queryGeolocationPermissionState();
+        if (hasRecentValidLocation || permissionState === 'granted') {
+          throw error;
+        }
+      }
       setLocationPrompt(toLocationPrompt(error));
       throw error;
+    }
+  };
+
+  const refreshExploreWithLiveLocation = async () => {
+    try {
+      const liveLocation = await requestLocationForExploreFlow();
+      await Promise.all([
+        updateLocationOnServer(liveLocation, 'explore'),
+        refreshNearbyUsersFullRadiusAtomic(liveLocation, { forceRefresh: true })
+      ]);
+      lastServerSyncAtRef.current = Date.now();
+    } catch (error) {
+      logRadarError('refreshExploreWithLiveLocation', error);
     }
   };
 
@@ -956,7 +1258,7 @@ const RadarView = () => {
       updateLocationOnServer(freshLocation, 'explore')
     ]);
     lastServerSyncAtRef.current = Date.now();
-    await fetchNearbyUsers(freshLocation, { forceRefresh: true });
+    await refreshNearbyUsersFullRadiusAtomic(freshLocation, { forceRefresh: true });
   };
 
   const activateVanishMode = async (options: { keepLocationPrompt?: boolean } = {}) => {
@@ -965,8 +1267,7 @@ const RadarView = () => {
     if (!keepLocationPrompt) {
       setLocationPrompt(null);
     }
-    setNearbyUsers([]);
-    nearbyResponseCacheRef.current.clear();
+    // Keep nearby users/cache warm in vanish mode so explore can render instantly.
     setHoverLabel(null);
     setFocusedUserId(null);
     try {
@@ -978,12 +1279,12 @@ const RadarView = () => {
   };
 
   useEffect(() => {
-    if (visibilityMode !== 'explore' || !navigator.geolocation) return;
+    if (!navigator.geolocation) return;
 
     let cancelled = false;
     const watchId = navigator.geolocation.watchPosition(
       (position) => {
-        if (cancelled || visibilityModeRef.current !== 'explore') return;
+        if (cancelled) return;
         const liveLocation = {
           lat: position.coords.latitude,
           lng: position.coords.longitude
@@ -991,11 +1292,36 @@ const RadarView = () => {
         setUserLocation(liveLocation);
         userLocationRef.current = liveLocation;
         lastLocationAtRef.current = Date.now();
-        setLocationPrompt(null);
+        persistLastKnownLocation(liveLocation);
+        if (visibilityModeRef.current === 'explore') {
+          setLocationPrompt(null);
+          locationServicesErrorCountRef.current = 0;
+        }
       },
       async (error) => {
-        if (cancelled || visibilityModeRef.current !== 'explore') return;
+        if (cancelled) return;
+        if (visibilityModeRef.current !== 'explore') return;
         const code = Number((error as GeolocationPositionError)?.code || 0);
+        const hasRecentValidLocation =
+          Boolean(userLocationRef.current) &&
+          Date.now() - lastLocationAtRef.current < RADAR_RECENT_LOCATION_GRACE_MS;
+
+        if ((code === 2 || code === 3) && hasRecentValidLocation) {
+          // Ignore transient availability/timeout errors while we still have a fresh location fix.
+          locationServicesErrorCountRef.current = 0;
+          return;
+        }
+        if (code === 2 || code === 3) {
+          locationServicesErrorCountRef.current += 1;
+          const permissionState = await queryGeolocationPermissionState();
+          const shouldShowServicesPrompt =
+            locationServicesErrorCountRef.current >= 2 &&
+            (permissionState !== 'granted' || !userLocationRef.current);
+          if (!shouldShowServicesPrompt) {
+            return;
+          }
+        }
+
         if (code === 1) {
           const permissionState = await queryGeolocationPermissionState();
           if (permissionState === 'denied') {
@@ -1006,8 +1332,10 @@ const RadarView = () => {
         } else {
           setLocationPrompt(toLocationPrompt(error));
         }
-        setLocationIssue('Location permission is required for Explore Mode.');
-        setNearbyUsers([]);
+        if (!hasRecentValidLocation) {
+          setLocationIssue('Location permission is required for Explore Mode.');
+          setNearbyUsers([]);
+        }
       },
       {
         enableHighAccuracy: false,
@@ -1020,7 +1348,7 @@ const RadarView = () => {
       cancelled = true;
       navigator.geolocation.clearWatch(watchId);
     };
-  }, [visibilityMode]);
+  }, []);
 
   const toggleVisibilityMode = async () => {
     if (isExploreActivationPending) return;
@@ -1037,8 +1365,17 @@ const RadarView = () => {
 
     try {
       setIsExploreActivationPending(true);
-      const freshLocation = await requestLocationForExploreFlow();
-      await activateExploreMode(freshLocation);
+      const cachedLocation = userLocationRef.current || readLastKnownLocation();
+      if (cachedLocation) {
+        setUserLocation(cachedLocation);
+        userLocationRef.current = cachedLocation;
+        lastLocationAtRef.current = Date.now();
+        await activateExploreMode(cachedLocation);
+        void refreshExploreWithLiveLocation();
+      } else {
+        const freshLocation = await requestLocationForExploreFlow();
+        await activateExploreMode(freshLocation);
+      }
     } catch (error) {
       logRadarError('toggleVisibilityMode:explore', error);
       // Keep user in vanish until both permission and live location are available.
@@ -1054,9 +1391,11 @@ const RadarView = () => {
     try {
       const freshLocation = await requestLocationForExploreFlow();
       if (visibilityMode === 'explore') {
-        await updateLocationOnServer(freshLocation, 'explore');
+        await Promise.all([
+          updateLocationOnServer(freshLocation, 'explore'),
+          refreshNearbyUsersFullRadiusAtomic(freshLocation, { forceRefresh: true })
+        ]);
         lastServerSyncAtRef.current = Date.now();
-        await fetchNearbyUsers(freshLocation, { forceRefresh: true });
       } else {
         await activateExploreMode(freshLocation);
       }
@@ -1617,9 +1956,14 @@ const RadarView = () => {
                   No users match your filters
                 </div>
               )}
-              {!loading && !isNearbyRefreshing && hasFetchedNearbyOnce && userLocation && nearbyUsers.length === 0 && (
+              {!loading &&
+                !isNearbyRefreshing &&
+                hasFetchedNearbyOnce &&
+                userLocation &&
+                usersInRange.length === 0 &&
+                getActiveFilterCount() === 0 && (
                 <div className="no-users-message">
-                  No profiles nearby. Try increasing distance.
+                  No available profiles. Try increasing distance.
                 </div>
               )}
             </>

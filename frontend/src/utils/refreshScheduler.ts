@@ -28,8 +28,8 @@ const laneConfigs: LaneConfig[] = [
   {
     name: 'medium',
     eventName: 'hivemate:radar-refresh',
-    visibleMs: 10000,
-    hiddenMs: 18000,
+    visibleMs: 30000,
+    hiddenMs: 30000,
     metric: 'refresh_tick_medium'
   },
   {
