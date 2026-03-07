@@ -1,4 +1,4 @@
-import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { lazy, Suspense, useEffect, useState } from 'react';
 import { applyUpdate } from './utils/serviceWorkerRegistration';
 import { startRefreshScheduler, stopRefreshScheduler } from './utils/refreshScheduler';
@@ -76,8 +76,57 @@ const RouteScrollController = () => {
   return null;
 };
 
+type EntryStage = 'closed' | 'split' | 'beam' | 'done';
+
+interface AppEntryIntroProps {
+  onComplete: () => void;
+}
+
+const AppEntryIntro = ({ onComplete }: AppEntryIntroProps) => {
+  const navigate = useNavigate();
+  const [entryStage, setEntryStage] = useState<EntryStage>('closed');
+
+  useEffect(() => {
+    const splitTimer = window.setTimeout(() => setEntryStage('split'), 3000);
+    const beamTimer = window.setTimeout(() => setEntryStage('beam'), 4500);
+    const doneTimer = window.setTimeout(() => setEntryStage('done'), 9500);
+    const completeTimer = window.setTimeout(() => {
+      const hasRememberedSession = localStorage.getItem('rememberMe') === 'true' && !!localStorage.getItem('token');
+      navigate(hasRememberedSession ? '/home' : '/', { replace: true });
+      onComplete();
+    }, 10850);
+
+    return () => {
+      window.clearTimeout(splitTimer);
+      window.clearTimeout(beamTimer);
+      window.clearTimeout(doneTimer);
+      window.clearTimeout(completeTimer);
+    };
+  }, [navigate, onComplete]);
+
+  return (
+    <div className={`landing-gate-overlay stage-${entryStage}`} aria-label="HiveMate intro">
+      <div className="landing-gate-panel landing-gate-panel-left" />
+      <div className="landing-gate-panel landing-gate-panel-right" />
+      <div className="landing-brand landing-brand-gate">
+        <span className="landing-brand-main gate-hive">Hive</span>
+        <span className="landing-brand-accent gate-mate">Mate</span>
+      </div>
+      <div className="landing-gate-burst" />
+      <div className="landing-gate-beam" />
+      <img src="/logo.svg" alt="" aria-hidden="true" className="landing-gate-bee" />
+      <p className="landing-gate-text">
+        Networking
+        <br />
+        Reimagined.
+      </p>
+    </div>
+  );
+};
+
 function App() {
   const [updateAvailable, setUpdateAvailable] = useState(false);
+  const [entryIntroComplete, setEntryIntroComplete] = useState(false);
 
   useEffect(() => {
     applyAuthSessionPolicy();
@@ -122,6 +171,9 @@ function App() {
         <Router>
           <RouteScrollController />
           <GlobalCallHandler />
+          {!entryIntroComplete && (
+            <AppEntryIntro onComplete={() => setEntryIntroComplete(true)} />
+          )}
           <Suspense fallback={<LoadingFallback />}>
             <Routes>
               <Route path="/" element={<LandingPage />} />
