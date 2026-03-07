@@ -47,35 +47,6 @@ export const updateLocation = async (req: Request, res: Response) => {
     );
 
 
-    // Broadcast location update to nearby users via WebSocket
-    try {
-      const wsServer = getWebSocketServer();
-      
-      // Get nearby users to notify
-      const nearbyLocations = await LocationService.getNearbyUsers(
-        latitude,
-        longitude,
-        5000, // 5km radius for notifications
-        userId
-      );
-
-
-      // Notify nearby users of location update
-      const nearbyUserIds = nearbyLocations
-        .map(loc => extractUserId(loc.userId))
-        .filter(Boolean);
-      wsServer.emitToUsers(nearbyUserIds, 'radar:update', {
-        userId,
-        latitude,
-        longitude,
-        mode,
-        timestamp: new Date()
-      });
-    } catch (wsError) {
-      console.error('WebSocket broadcast error:', wsError);
-      // Don't fail the request if WebSocket fails
-    }
-
     res.json({
       message: 'Location updated successfully',
       location: {
@@ -85,6 +56,34 @@ export const updateLocation = async (req: Request, res: Response) => {
         timestamp: new Date()
       }
     });
+
+    // Broadcast location update in background so API response is not delayed.
+    void (async () => {
+      try {
+        const wsServer = getWebSocketServer();
+
+        const nearbyLocations = await LocationService.getNearbyUsers(
+          latitude,
+          longitude,
+          5000, // 5km radius for notifications
+          userId
+        );
+
+        const nearbyUserIds = nearbyLocations
+          .map(loc => extractUserId(loc.userId))
+          .filter(Boolean);
+
+        wsServer.emitToUsers(nearbyUserIds, 'radar:update', {
+          userId,
+          latitude,
+          longitude,
+          mode,
+          timestamp: new Date()
+        });
+      } catch (wsError) {
+        console.error('WebSocket broadcast error:', wsError);
+      }
+    })();
   } catch (error: any) {
     if (error.message.includes('too frequent')) {
       return res.status(429).json({
@@ -237,12 +236,26 @@ export const toggleVisibilityMode = async (req: Request, res: Response) => {
     const [lng, lat] = location.coordinates.coordinates;
     await LocationService.updateVisibilityMode(userId, mode);
 
-    // If switching to explore mode, notify nearby users
-    if (mode === 'explore') {
+    res.json({
+      message: 'Visibility mode updated successfully',
+      mode,
+      timestamp: new Date()
+    });
+
+    // Notify clients in background so mode toggle itself remains immediate.
+    void (async () => {
       try {
         const wsServer = getWebSocketServer();
-        
-        // Get nearby users
+        wsServer.broadcast('user:visibility:changed', {
+          userId,
+          mode,
+          timestamp: new Date()
+        });
+
+        if (mode !== 'explore') {
+          return;
+        }
+
         const nearbyLocations = await LocationService.getNearbyUsers(
           lat,
           lng,
@@ -250,13 +263,11 @@ export const toggleVisibilityMode = async (req: Request, res: Response) => {
           userId
         );
 
-        // Get user profile for notification
-        const profile = await Profile.findOne({ userId });
-        
-        // Notify nearby users
+        const profile = await Profile.findOne({ userId }).select('name').lean();
         const nearbyUserIds = nearbyLocations
           .map(loc => extractUserId(loc.userId))
           .filter(Boolean);
+
         wsServer.emitToUsers(nearbyUserIds, 'nearby:notification', {
           userId,
           name: profile?.name || 'Someone',
@@ -266,13 +277,7 @@ export const toggleVisibilityMode = async (req: Request, res: Response) => {
       } catch (wsError) {
         console.error('WebSocket notification error:', wsError);
       }
-    }
-
-    res.json({
-      message: 'Visibility mode updated successfully',
-      mode,
-      timestamp: new Date()
-    });
+    })();
   } catch (error: any) {
     console.error('Toggle visibility error:', error);
     res.status(500).json({

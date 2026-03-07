@@ -50,7 +50,7 @@ type RadarLoadPhase = 'starting' | 'searching' | 'ready';
 
 const RADAR_SCAN_CYCLE_MS = 700;
 const SCROLL_LOG_THROTTLE_MS = 180;
-const RADAR_RESPONSE_CACHE_TTL_MS = 8000;
+const RADAR_RESPONSE_CACHE_TTL_MS = 2500;
 
 const isScrollDebugEnabled = () => {
   if (typeof window === 'undefined') return false;
@@ -148,6 +148,7 @@ const RadarView = () => {
   const nearbyResponseCacheRef = useRef<Map<string, { at: number; users: RadarDot[] }>>(new Map());
   const nearbyFetchRequestIdRef = useRef(0);
   const distanceFetchDebounceRef = useRef<number | null>(null);
+  const socketRefreshDebounceRef = useRef<number | null>(null);
 
   const API_URL = getApiBaseUrl();
   const handleUnauthorized = () => {
@@ -558,15 +559,40 @@ const RadarView = () => {
   useEffect(() => {
     const sharedSocket = acquireSharedSocket();
     if (sharedSocket) {
-      const handleRadarUpdate = () => undefined;
-      const handleNearbyNotification = () => undefined;
+      const triggerRealtimeRefresh = () => {
+        if (visibilityModeRef.current !== 'explore') return;
+        if (!userLocationRef.current) return;
+        if (socketRefreshDebounceRef.current !== null) {
+          window.clearTimeout(socketRefreshDebounceRef.current);
+        }
+        socketRefreshDebounceRef.current = window.setTimeout(() => {
+          socketRefreshDebounceRef.current = null;
+          void fetchNearbyUsers(userLocationRef.current, { silent: true, forceRefresh: true });
+        }, 180);
+      };
+
+      const handleRadarUpdate = () => {
+        triggerRealtimeRefresh();
+      };
+      const handleNearbyNotification = () => {
+        triggerRealtimeRefresh();
+      };
+      const handleVisibilityChanged = () => {
+        triggerRealtimeRefresh();
+      };
       sharedSocket.on('radar:update', handleRadarUpdate);
       sharedSocket.on('nearby:notification', handleNearbyNotification);
+      sharedSocket.on('user:visibility:changed', handleVisibilityChanged);
       socketRef.current = sharedSocket;
 
       return () => {
         sharedSocket.off('radar:update', handleRadarUpdate);
         sharedSocket.off('nearby:notification', handleNearbyNotification);
+        sharedSocket.off('user:visibility:changed', handleVisibilityChanged);
+        if (socketRefreshDebounceRef.current !== null) {
+          window.clearTimeout(socketRefreshDebounceRef.current);
+          socketRefreshDebounceRef.current = null;
+        }
         releaseSharedSocket();
       };
     }
@@ -606,7 +632,7 @@ const RadarView = () => {
       distanceFetchDebounceRef.current = window.setTimeout(() => {
         syncRadarData();
         distanceFetchDebounceRef.current = null;
-      }, 220);
+      }, 120);
     }
 
     return () => {
@@ -636,15 +662,17 @@ const RadarView = () => {
           ? { ...userLocationRef.current }
           : await requestLocationAccess();
         if (cancelled) return;
-      await updateLocationOnServer(freshLocation, 'explore');
-      lastServerSyncAtRef.current = Date.now();
-      await fetchNearbyUsers(freshLocation);
-    } catch (error) {
-      if (cancelled) return;
-      logRadarError('startExploreMode', error, { cancelled });
-      setLocationIssue('Location permission is required for Explore Mode.');
-      setNearbyUsers([]);
-    }
+        await Promise.all([
+          updateLocationOnServer(freshLocation, 'explore'),
+          fetchNearbyUsers(freshLocation)
+        ]);
+        lastServerSyncAtRef.current = Date.now();
+      } catch (error) {
+        if (cancelled) return;
+        logRadarError('startExploreMode', error, { cancelled });
+        setLocationIssue('Location permission is required for Explore Mode.');
+        setNearbyUsers([]);
+      }
     };
 
     startExploreMode();
@@ -707,19 +735,23 @@ const RadarView = () => {
         window.clearTimeout(distanceFetchDebounceRef.current);
         distanceFetchDebounceRef.current = null;
       }
+      if (socketRefreshDebounceRef.current !== null) {
+        window.clearTimeout(socketRefreshDebounceRef.current);
+        socketRefreshDebounceRef.current = null;
+      }
     };
   }, []);
 
   const fetchNearbyUsers = async (
     location = userLocation,
-    options: { silent?: boolean } = {}
+    options: { silent?: boolean; forceRefresh?: boolean } = {}
   ) => {
     if (!location) return;
-    const radiusInMeters = distanceRange * 1000; // Convert km to meters
+    const radiusInMeters = distanceRangeRef.current * 1000; // Convert km to meters
     const cacheKey = `${location.lat.toFixed(4)}:${location.lng.toFixed(4)}:${radiusInMeters}`;
     const cached = nearbyResponseCacheRef.current.get(cacheKey);
     const now = Date.now();
-    if (cached && now - cached.at < RADAR_RESPONSE_CACHE_TTL_MS) {
+    if (!options.forceRefresh && cached && now - cached.at < RADAR_RESPONSE_CACHE_TTL_MS) {
       setNearbyUsers(cached.users);
       setHasFetchedNearbyOnce(true);
       setRadarLoadPhase('ready');
@@ -750,7 +782,8 @@ const RadarView = () => {
           signal: controller.signal
         },
         {
-          ttlMs: 10000
+          ttlMs: 3000,
+          forceRefresh: Boolean(options.forceRefresh)
         }
       );
       const users = data.nearbyUsers || [];
@@ -917,11 +950,13 @@ const RadarView = () => {
 
   const activateExploreMode = async (freshLocation: { lat: number; lng: number }) => {
     hasExploreBootstrappedRef.current = true;
-    await setServerVisibilityMode('explore');
     setVisibilityMode('explore');
-    await updateLocationOnServer(freshLocation, 'explore');
+    await Promise.all([
+      setServerVisibilityMode('explore'),
+      updateLocationOnServer(freshLocation, 'explore')
+    ]);
     lastServerSyncAtRef.current = Date.now();
-    await fetchNearbyUsers(freshLocation);
+    await fetchNearbyUsers(freshLocation, { forceRefresh: true });
   };
 
   const activateVanishMode = async (options: { keepLocationPrompt?: boolean } = {}) => {
@@ -931,6 +966,7 @@ const RadarView = () => {
       setLocationPrompt(null);
     }
     setNearbyUsers([]);
+    nearbyResponseCacheRef.current.clear();
     setHoverLabel(null);
     setFocusedUserId(null);
     try {
@@ -1020,7 +1056,7 @@ const RadarView = () => {
       if (visibilityMode === 'explore') {
         await updateLocationOnServer(freshLocation, 'explore');
         lastServerSyncAtRef.current = Date.now();
-        await fetchNearbyUsers(freshLocation);
+        await fetchNearbyUsers(freshLocation, { forceRefresh: true });
       } else {
         await activateExploreMode(freshLocation);
       }
@@ -1583,7 +1619,7 @@ const RadarView = () => {
               )}
               {!loading && !isNearbyRefreshing && hasFetchedNearbyOnce && userLocation && nearbyUsers.length === 0 && (
                 <div className="no-users-message">
-                  No users nearby in explore mode
+                  No profiles nearby. Try increasing distance.
                 </div>
               )}
             </>

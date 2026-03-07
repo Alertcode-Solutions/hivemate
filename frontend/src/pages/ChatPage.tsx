@@ -60,6 +60,7 @@ const MAX_SWIPE_DISTANCE = 60;
 const PREVIEW_REPLY_CHARS = 90;
 const AUTO_SCROLL_BOTTOM_EPSILON = 100;
 const REDIRECT_OPEN_MIN_BUFFER_MS = 380;
+const CHAT_HISTORY_PAGE_LIMIT = 100;
 
 type MessageActionSheetState = {
   messageId: string;
@@ -212,6 +213,8 @@ const ChatPage = () => {
   const [peerOnline, setPeerOnline] = useState(false);
   const [peerLastSeen, setPeerLastSeen] = useState<string>('');
   const [showScrollToBottomButton, setShowScrollToBottomButton] = useState(false);
+  const [hasMoreMessages, setHasMoreMessages] = useState(false);
+  const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
   const [chatOpenError, setChatOpenError] = useState('');
   const [redirectOpenLoading, setRedirectOpenLoading] = useState(false);
   const [redirectPendingSelection, setRedirectPendingSelection] = useState(false);
@@ -266,6 +269,7 @@ const ChatPage = () => {
   const messagesAbortControllerRef = useRef<AbortController | null>(null);
   const openDirectChatInFlightRef = useRef<string>('');
   const redirectOpenStartedAtRef = useRef<number>(0);
+  const oldestMessageTimestampByRoomRef = useRef<Record<string, string>>({});
   const reactionMutationInFlightRef = useRef<Record<string, boolean>>({});
   const reactionSocketDebounceTimersRef = useRef<Record<string, number>>({});
   const reactionSocketPendingRef = useRef<
@@ -668,6 +672,8 @@ const ChatPage = () => {
       forceScrollToBottomRef.current = true;
       isAtBottomRef.current = true;
       initialScrollDoneRef.current = '';
+      setHasMoreMessages(false);
+      setLoadingOlderMessages(false);
       const roomId = String(selectedChatRoom.chatRoomId);
       setMessages(roomMessagesCacheRef.current[roomId] || []);
       setReplyTarget(null);
@@ -1050,10 +1056,12 @@ const ChatPage = () => {
         (isAtBottomRef.current && !isUserScrollingRef.current) ||
         lastMessageByMe
       ) {
-        container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
+        container.scrollTo({ top: container.scrollHeight, behavior: 'auto' });
+        isAtBottomRef.current = true;
       }
     } else if (forceScrollToBottomRef.current) {
-      container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
+      container.scrollTo({ top: container.scrollHeight, behavior: 'auto' });
+      isAtBottomRef.current = true;
     }
 
     forceScrollToBottomRef.current = false;
@@ -1579,6 +1587,50 @@ const ChatPage = () => {
     setParticipantPhotos({ ...photoCacheRef.current });
   };
 
+  const decryptMessages = async (messagesToDecrypt: Message[]) => {
+    const keyPair = await EncryptionService.getKeyPair();
+    return Promise.all(
+      (messagesToDecrypt || []).map(async (msg: Message) => {
+        try {
+          if (msg.deletedForEveryone) {
+            return { ...msg, encryptedContent: DELETED_MESSAGE_TEXT, deletedForEveryone: true };
+          }
+          const normalizedMessageId = normalizeId(msg.id);
+          const cacheEntry = decryptedMessageCacheRef.current[normalizedMessageId];
+          if (cacheEntry && cacheEntry.cipher === msg.encryptedContent) {
+            return {
+              ...msg,
+              encryptedContent: cacheEntry.text,
+              savedByCurrentUser: Boolean((msg as any).savedByCurrentUser)
+            };
+          }
+          const decryptedContent = await EncryptionService.decryptMessage(
+            msg.encryptedContent,
+            keyPair.privateKey
+          );
+          decryptedMessageCacheRef.current[normalizedMessageId] = {
+            cipher: msg.encryptedContent,
+            text: decryptedContent
+          };
+          return {
+            ...msg,
+            encryptedContent: decryptedContent,
+            savedByCurrentUser: Boolean((msg as any).savedByCurrentUser)
+          };
+        } catch {
+          if (msg.deletedForEveryone) {
+            return { ...msg, encryptedContent: DELETED_MESSAGE_TEXT, deletedForEveryone: true };
+          }
+          return {
+            ...msg,
+            encryptedContent: CIPHERTEXT_PLACEHOLDER,
+            savedByCurrentUser: Boolean((msg as any).savedByCurrentUser)
+          };
+        }
+      })
+    );
+  };
+
   const loadMessages = async (chatRoomId: string) => {
     const loadId = ++activeMessagesLoadRef.current;
     if (messagesAbortControllerRef.current) {
@@ -1588,10 +1640,13 @@ const ChatPage = () => {
     messagesAbortControllerRef.current = controller;
     try {
       const token = localStorage.getItem('token');
-      const response = await fetch(`${API_URL}/api/messages/chat/${chatRoomId}`, {
+      const response = await fetch(
+        `${API_URL}/api/messages/chat/${chatRoomId}?limit=${CHAT_HISTORY_PAGE_LIMIT}`,
+        {
         headers: { Authorization: `Bearer ${token}` },
         signal: controller.signal
-      });
+        }
+      );
       if (response.status === 401) {
         handleSessionExpired();
         return;
@@ -1600,49 +1655,7 @@ const ChatPage = () => {
       if (response.ok) {
         if (loadId !== activeMessagesLoadRef.current) return;
         const data = await response.json();
-        
-        // Decrypt all messages
-        const keyPair = await EncryptionService.getKeyPair();
-        const decryptedMessages = await Promise.all(
-          (data.messages || []).map(async (msg: Message) => {
-            try {
-              if (msg.deletedForEveryone) {
-                return { ...msg, encryptedContent: DELETED_MESSAGE_TEXT, deletedForEveryone: true };
-              }
-              const normalizedMessageId = normalizeId(msg.id);
-              const cacheEntry = decryptedMessageCacheRef.current[normalizedMessageId];
-              if (cacheEntry && cacheEntry.cipher === msg.encryptedContent) {
-                return {
-                  ...msg,
-                  encryptedContent: cacheEntry.text,
-                  savedByCurrentUser: Boolean((msg as any).savedByCurrentUser)
-                };
-              }
-              const decryptedContent = await EncryptionService.decryptMessage(
-                msg.encryptedContent,
-                keyPair.privateKey
-              );
-              decryptedMessageCacheRef.current[normalizedMessageId] = {
-                cipher: msg.encryptedContent,
-                text: decryptedContent
-              };
-              return {
-                ...msg,
-                encryptedContent: decryptedContent,
-                savedByCurrentUser: Boolean((msg as any).savedByCurrentUser)
-              };
-            } catch {
-              if (msg.deletedForEveryone) {
-                return { ...msg, encryptedContent: DELETED_MESSAGE_TEXT, deletedForEveryone: true };
-              }
-              return {
-                ...msg,
-                encryptedContent: CIPHERTEXT_PLACEHOLDER,
-                savedByCurrentUser: Boolean((msg as any).savedByCurrentUser)
-              };
-            }
-          })
-        );
+        const decryptedMessages = await decryptMessages(data.messages || []);
         if (loadId !== activeMessagesLoadRef.current) return;
         const normalizedRoomId = normalizeId(chatRoomId);
         const isFirstLoadForRoom = initialScrollDoneRef.current !== normalizedRoomId;
@@ -1654,6 +1667,9 @@ const ChatPage = () => {
         const filteredMessages = mergedMessages.filter(
           (message) => !deletedMessageTombstonesRef.current[normalizeId(message.id)]
         );
+        setHasMoreMessages(Boolean(data?.hasMore));
+        oldestMessageTimestampByRoomRef.current[String(chatRoomId)] =
+          filteredMessages.length > 0 ? new Date(filteredMessages[0].timestamp).toISOString() : '';
         setMessages((prev) => (areMessageListsEquivalent(prev, filteredMessages) ? prev : filteredMessages));
         roomMessagesCacheRef.current[String(chatRoomId)] = filteredMessages;
         if (isFirstLoadForRoom) {
@@ -1704,6 +1720,56 @@ const ChatPage = () => {
         handleSessionExpired();
       }
       throw error;
+    }
+  };
+
+  const loadOlderMessages = async () => {
+    const activeRoomId = String(selectedChatRoomRef.current?.chatRoomId || '');
+    if (!activeRoomId || loadingOlderMessages || !hasMoreMessages) return;
+    const before = oldestMessageTimestampByRoomRef.current[activeRoomId];
+    if (!before) return;
+
+    try {
+      setLoadingOlderMessages(true);
+      const token = localStorage.getItem('token');
+      if (!token) return;
+
+      const response = await fetch(
+        `${API_URL}/api/messages/chat/${activeRoomId}?limit=${CHAT_HISTORY_PAGE_LIMIT}&before=${encodeURIComponent(before)}`,
+        {
+          headers: { Authorization: `Bearer ${token}` }
+        }
+      );
+
+      if (response.status === 401) {
+        handleSessionExpired();
+        return;
+      }
+      if (!response.ok) return;
+
+      const data = await response.json();
+      const decryptedOlderMessages = await decryptMessages(data.messages || []);
+      const filteredOlderMessages = decryptedOlderMessages.filter(
+        (message: Message) => !deletedMessageTombstonesRef.current[normalizeId(message.id)]
+      );
+      if (filteredOlderMessages.length === 0) {
+        setHasMoreMessages(Boolean(data?.hasMore));
+        return;
+      }
+
+      setMessages((prev) => {
+        const merged = upsertMessagesById([...filteredOlderMessages, ...prev]);
+        roomMessagesCacheRef.current[activeRoomId] = merged;
+        return merged;
+      });
+      oldestMessageTimestampByRoomRef.current[activeRoomId] = new Date(
+        filteredOlderMessages[0].timestamp
+      ).toISOString();
+      setHasMoreMessages(Boolean(data?.hasMore));
+    } catch (error) {
+      console.error('Failed to load older messages:', error);
+    } finally {
+      setLoadingOlderMessages(false);
     }
   };
 
@@ -3124,6 +3190,18 @@ const ChatPage = () => {
                 onWheel={markUserScrolling}
                 onTouchMove={markUserScrolling}
               >
+                {hasMoreMessages && (
+                  <div className="messages-pagination">
+                    <button
+                      type="button"
+                      className="load-older-btn"
+                      onClick={() => void loadOlderMessages()}
+                      disabled={loadingOlderMessages}
+                    >
+                      {loadingOlderMessages ? 'Loading older messages...' : 'Load older messages'}
+                    </button>
+                  </div>
+                )}
                 {messages.map((message, index) => {
                   const isOwnMessage = String(message.senderId) === currentUserIdStr;
                   const previousMessage = index > 0 ? messages[index - 1] : null;

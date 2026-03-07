@@ -6,11 +6,30 @@ import Notification from '../models/Notification';
 import { ChatService } from '../services/chatService';
 import { InteractionService } from '../services/interactionService';
 import { NotificationService } from '../services/notificationService';
+import { CacheService } from '../services/cacheService';
 import { getWebSocketServer } from '../websocket/server';
 import Profile from '../models/Profile';
 import Friendship from '../models/Friendship';
 
 const DELETED_MESSAGE_TEXT = 'This message was deleted';
+const DEFAULT_CHAT_HISTORY_LIMIT = 100;
+const MAX_CHAT_HISTORY_LIMIT = 200;
+const CHAT_HISTORY_CACHE_TTL_SECONDS = 20;
+
+const normalizeHistoryLimit = (rawLimit: any): number => {
+  const parsed = Number.parseInt(String(rawLimit ?? DEFAULT_CHAT_HISTORY_LIMIT), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return DEFAULT_CHAT_HISTORY_LIMIT;
+  }
+  return Math.min(parsed, MAX_CHAT_HISTORY_LIMIT);
+};
+
+const getLatestChatHistoryCacheKey = (chatRoomId: string, userId: string, limit: number) =>
+  `chat:history:${String(chatRoomId)}:${String(userId)}:latest:${limit}`;
+
+const invalidateChatHistoryCache = async (chatRoomId: string) => {
+  await CacheService.deletePattern(`chat:history:${String(chatRoomId)}:*`);
+};
 
 export const sendMessage = async (req: Request, res: Response) => {
   try {
@@ -46,6 +65,11 @@ export const sendMessage = async (req: Request, res: Response) => {
       });
     }
 
+    const senderProfilePromise = Profile.findOne({ userId: senderId })
+      .select('name')
+      .lean()
+      .catch(() => null);
+
     // Create message
     const message = new Message({
       chatRoomId: roomId,
@@ -66,43 +90,55 @@ export const sendMessage = async (req: Request, res: Response) => {
 
     // Update chat room last message time
     await ChatService.updateLastMessageTime(roomId, [senderId, receiverId]);
+    void invalidateChatHistoryCache(roomId).catch((cacheError) => {
+      console.error('Chat history cache invalidate error:', cacheError);
+    });
 
-    // Increment interaction count
-    try {
-      await InteractionService.incrementInteraction(senderId, receiverId);
-    } catch (interactionError) {
+    // Increment interaction count in background to keep send path fast.
+    void InteractionService.incrementInteraction(senderId, receiverId).catch((interactionError) => {
       console.error('Interaction tracking error:', interactionError);
-    }
+    });
 
     // Send via WebSocket
     try {
       const wsServer = getWebSocketServer();
-      const senderProfile = await Profile.findOne({ userId: senderId });
       
       wsServer.emitToUser(receiverId, 'message:receive', {
         messageId: message._id,
         chatRoomId: roomId,
         senderId,
-        senderName: senderProfile?.name,
+        senderName: undefined,
         encryptedContent,
         replyToMessageId: message.replyToMessageId || null,
         timestamp: message.timestamp
       });
 
+      // Mark as delivered
+      message.delivered = true;
+      void Message.updateOne(
+        { _id: message._id },
+        { $set: { delivered: true } }
+      ).catch((deliverUpdateError) => {
+        console.error('Delivered update error:', deliverUpdateError);
+      });
+
       // Persist + realtime notification from one place to avoid duplicates/missed reload.
-      if (mongoose.connection.readyState === 1) {
-        void NotificationService.notifyMessage(
-          receiverId,
-          senderProfile?.name || 'Someone',
-          senderId,
-          {
-            messageId: message._id,
-            chatRoomId: roomId
-          }
-        ).catch((notificationError) => {
-          console.error('Notification dispatch error:', notificationError);
-        });
-      } else {
+      void (async () => {
+        const senderProfile = await senderProfilePromise;
+
+        if (mongoose.connection.readyState === 1) {
+          await NotificationService.notifyMessage(
+            receiverId,
+            senderProfile?.name || 'Someone',
+            senderId,
+            {
+              messageId: message._id,
+              chatRoomId: roomId
+            }
+          );
+          return;
+        }
+
         wsServer.emitToUser(receiverId, 'notification:new', {
           type: 'message',
           title: 'New message',
@@ -114,11 +150,9 @@ export const sendMessage = async (req: Request, res: Response) => {
           },
           timestamp: new Date()
         });
-      }
-
-      // Mark as delivered
-      message.delivered = true;
-      await message.save();
+      })().catch((notificationError) => {
+        console.error('Notification dispatch error:', notificationError);
+      });
     } catch (wsError) {
       console.error('WebSocket send error:', wsError);
     }
@@ -162,7 +196,8 @@ export const getChatHistory = async (req: Request, res: Response) => {
   try {
     const userId = (req as any).userId;
     const { chatRoomId } = req.params;
-    const { limit = 50, before } = req.query;
+    const { limit, before } = req.query;
+    const normalizedLimit = normalizeHistoryLimit(limit);
 
     // Verify user is participant
     const isParticipant = await ChatService.isParticipant(chatRoomId, userId);
@@ -183,12 +218,24 @@ export const getChatHistory = async (req: Request, res: Response) => {
       query.timestamp = { $lt: new Date(before as string) };
     }
 
-    // Get messages
-    const messages = await Message.find(query)
-      .select('senderId receiverId encryptedContent senderEncryptedContent replyToMessageId timestamp delivered read deletedForEveryone reactions savedForEveryone')
-      .sort({ timestamp: -1 })
-      .limit(parseInt(limit as string))
-      .lean();
+    const isLatestPage = !before;
+    const latestPageCacheKey = getLatestChatHistoryCacheKey(chatRoomId, userId, normalizedLimit);
+    let messages: any[] | null = null;
+
+    if (isLatestPage) {
+      const cachedMessages = await CacheService.get<any[]>(latestPageCacheKey);
+      if (Array.isArray(cachedMessages)) {
+        messages = cachedMessages;
+      }
+    }
+
+    if (!messages) {
+      messages = await Message.find(query)
+        .select('senderId receiverId encryptedContent senderEncryptedContent replyToMessageId timestamp delivered read deletedForEveryone reactions savedForEveryone')
+        .sort({ timestamp: -1 })
+        .limit(normalizedLimit)
+        .lean();
+    }
     const visibleMessageIds = messages
       .map((msg: any) => msg?._id)
       .filter(Boolean);
@@ -233,6 +280,22 @@ export const getChatHistory = async (req: Request, res: Response) => {
       Notification.deleteMany(messageNotificationQuery)
     ]);
 
+    messages = messages.map((msg: any) => {
+      if (String(msg.receiverId) !== String(userId)) {
+        return msg;
+      }
+      if (msg.read === true) {
+        return msg;
+      }
+      return { ...msg, read: true };
+    });
+
+    if (isLatestPage) {
+      void CacheService.set(latestPageCacheKey, messages, CHAT_HISTORY_CACHE_TTL_SECONDS).catch((cacheSetError) => {
+        console.error('Chat history cache set error:', cacheSetError);
+      });
+    }
+
     res.json({
       messages: messages.reverse().map((msg: any) => ({
         id: msg._id,
@@ -255,7 +318,7 @@ export const getChatHistory = async (req: Request, res: Response) => {
         }))
       })),
       total: messages.length,
-      hasMore: messages.length === parseInt(limit as string)
+      hasMore: messages.length === normalizedLimit
     });
   } catch (error: any) {
     console.error('Get chat history error:', error);
@@ -475,6 +538,9 @@ export const reactToMessage = async (req: Request, res: Response) => {
       });
     }
     await message.save();
+    void invalidateChatHistoryCache(message.chatRoomId.toString()).catch((cacheError) => {
+      console.error('Chat history cache invalidate error:', cacheError);
+    });
 
     try {
       const wsServer = getWebSocketServer();
@@ -539,6 +605,9 @@ export const removeReactionFromMessage = async (req: Request, res: Response) => 
       (reaction: any) => reaction.userId?.toString() !== userId
     ) as any;
     await message.save();
+    void invalidateChatHistoryCache(message.chatRoomId.toString()).catch((cacheError) => {
+      console.error('Chat history cache invalidate error:', cacheError);
+    });
 
     try {
       const wsServer = getWebSocketServer();
@@ -665,6 +734,9 @@ export const deleteMessageForMe = async (req: Request, res: Response) => {
     if (!alreadyDeleted) {
       message.deletedForUsers.push(userId as any);
       await message.save();
+      void invalidateChatHistoryCache(message.chatRoomId.toString()).catch((cacheError) => {
+        console.error('Chat history cache invalidate error:', cacheError);
+      });
     }
 
     return res.json({
@@ -714,6 +786,9 @@ export const deleteMessageForEveryone = async (req: Request, res: Response) => {
     message.senderEncryptedContent = DELETED_MESSAGE_TEXT;
     message.deletedAt = new Date();
     await message.save();
+    void invalidateChatHistoryCache(message.chatRoomId.toString()).catch((cacheError) => {
+      console.error('Chat history cache invalidate error:', cacheError);
+    });
 
     try {
       const wsServer = getWebSocketServer();
@@ -776,6 +851,9 @@ export const saveMessageForMe = async (req: Request, res: Response) => {
     message.savedForEveryone = true;
     message.exitedByUsers = [];
     await message.save();
+    void invalidateChatHistoryCache(message.chatRoomId.toString()).catch((cacheError) => {
+      console.error('Chat history cache invalidate error:', cacheError);
+    });
 
     try {
       const wsServer = getWebSocketServer();
@@ -839,6 +917,9 @@ export const unsaveMessageForMe = async (req: Request, res: Response) => {
     message.savedForEveryone = false;
     message.exitedByUsers = [];
     await message.save();
+    void invalidateChatHistoryCache(message.chatRoomId.toString()).catch((cacheError) => {
+      console.error('Chat history cache invalidate error:', cacheError);
+    });
 
     try {
       const wsServer = getWebSocketServer();
@@ -903,6 +984,9 @@ export const markMessageViewed = async (req: Request, res: Response) => {
     if (!message.viewedByUsers.some((id) => id.toString() === userId)) {
       message.viewedByUsers.push(userId as any);
       await message.save();
+      void invalidateChatHistoryCache(message.chatRoomId.toString()).catch((cacheError) => {
+        console.error('Chat history cache invalidate error:', cacheError);
+      });
     }
 
     return res.json({
@@ -974,6 +1058,9 @@ export const expireViewedUnsavedMessagesForMe = async (req: Request, res: Respon
 
     if (operations.length > 0) {
       await Message.bulkWrite(operations, { ordered: false });
+      void invalidateChatHistoryCache(chatRoomId).catch((cacheError) => {
+        console.error('Chat history cache invalidate error:', cacheError);
+      });
     }
 
     return res.json({
@@ -1024,6 +1111,9 @@ export const markChatRead = async (req: Request, res: Response) => {
       type: 'message',
       'data.chatRoomId': chatRoomId
     });
+    void invalidateChatHistoryCache(chatRoomId).catch((cacheError) => {
+      console.error('Chat history cache invalidate error:', cacheError);
+    });
 
     return res.json({
       message: 'Chat marked as read',
@@ -1065,6 +1155,9 @@ export const deleteChatForMe = async (req: Request, res: Response) => {
 
     await ChatRoom.findByIdAndUpdate(chatRoomId, {
       $addToSet: { hiddenForUsers: userId }
+    });
+    void invalidateChatHistoryCache(chatRoomId).catch((cacheError) => {
+      console.error('Chat history cache invalidate error:', cacheError);
     });
 
     return res.json({

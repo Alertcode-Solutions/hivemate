@@ -592,6 +592,28 @@
   color: var(--text-muted);
 }
 
+.messages-pagination {
+  display: flex;
+  justify-content: center;
+  padding: 4px 0 10px;
+}
+
+.load-older-btn {
+  border: 1px solid rgba(37, 99, 235, 0.28);
+  background: rgba(255, 255, 255, 0.96);
+  color: #1d4ed8;
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.load-older-btn:disabled {
+  opacity: 0.68;
+  cursor: not-allowed;
+}
+
 .message {
   display: flex;
   flex-direction: column;

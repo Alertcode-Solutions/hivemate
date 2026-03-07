@@ -118,6 +118,7 @@ export class LocationService {
     }
 
     const results = await Location.find(query)
+      .select('userId coordinates mode timestamp')
       .lean() // Use lean() for better performance
       .limit(100); // Limit results to prevent excessive data
 
